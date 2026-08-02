@@ -1,0 +1,17 @@
+[project]
+name = "mailserver-mock"
+version = "0.1.0"
+description = "mail server mock"
+readme = "README.md"
+authors = [
+    { name = "wlanboy", email = "wlanboy@githumb.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+mailserver-mock = "mailserver_mock:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
