@@ -1,0 +1,53 @@
+{
+  "users": [
+    {
+      "username": "testuser",
+      "password": "testpass",
+      "behavior": "normal"
+    },
+    {
+      "username": "testuser_421",
+      "password": "testpass",
+      "behavior": "too_many",
+      "delay_seconds": 1,
+      "smtp": {
+        "code": "421",
+        "enhanced_code": "4.7.0",
+        "message": "Too many errors, closing transmission channel"
+      },
+      "imap": {
+        "response_code": "LIMIT",
+        "message": "Too many simultaneous connections"
+      }
+    },
+    {
+      "username": "testuser_451",
+      "password": "testpass",
+      "behavior": "timeout",
+      "delay_seconds": 60,
+      "smtp": {
+        "code": "451",
+        "enhanced_code": "4.4.2",
+        "message": "Timeout waiting for response, closing connection"
+      },
+      "imap": {
+        "response_code": "UNAVAILABLE",
+        "message": "Temporary failure, please try again later"
+      }
+    },
+    {
+      "username": "testuser_552",
+      "password": "testpass",
+      "behavior": "quota",
+      "smtp": {
+        "code": "552",
+        "enhanced_code": "5.2.2",
+        "message": "Mailbox full, quota exceeded"
+      },
+      "imap": {
+        "response_code": "OVERQUOTA",
+        "message": "Quota exceeded"
+      }
+    }
+  ]
+}
