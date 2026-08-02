@@ -8,6 +8,7 @@ import socket
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("MAIL_DIR", tempfile.mkdtemp(prefix="mailserver_mock_tests_"))
 
@@ -62,6 +63,22 @@ def _smtp_login(r, w):
     _write(w, base64.b64encode(b"testpass").decode())
     resp = _read(r)
     assert "235" in resp, resp
+
+
+def _smtp_auth_login(r, w, username, password):
+    """Führt EHLO + AUTH LOGIN mit beliebigen Zugangsdaten aus und gibt die
+    finale Server-Antwort zurück (ohne Erfolg vorauszusetzen)."""
+    _read(r)  # 220 Banner
+    _write(w, "EHLO localhost")
+    _read(r)
+    _read(r)
+    _read(r)
+    _write(w, "AUTH LOGIN")
+    _read(r)  # 334 Benutzername:
+    _write(w, base64.b64encode(username.encode()).decode())
+    _read(r)  # 334 Passwort:
+    _write(w, base64.b64encode(password.encode()).decode())
+    return _read(r)
 
 
 def _smtp_send_mail(from_addr, to_addr, body):
@@ -298,6 +315,49 @@ class SMTPTests(unittest.TestCase):
         finally:
             sock.close()
 
+    def test_too_many_login_delay_and_error(self):
+        sock, r, w = _dial((SMTP_HOST, SMTP_PORT))
+        try:
+            start = time.time()
+            resp = _smtp_auth_login(r, w, "testuser_421", "testpass_421")
+            elapsed = time.time() - start
+            self.assertIn("421", resp)
+            self.assertIn("4.7.0", resp)
+            self.assertGreaterEqual(elapsed, 0.9)
+        finally:
+            sock.close()
+
+    def test_timeout_login_error(self):
+        sock, r, w = _dial((SMTP_HOST, SMTP_PORT))
+        try:
+            with patch("mailserver_mock.smtp_server.time.sleep"):
+                resp = _smtp_auth_login(r, w, "testuser_451", "testpass_451")
+            self.assertIn("451", resp)
+            self.assertIn("4.4.2", resp)
+        finally:
+            sock.close()
+
+    def test_quota_error_on_data(self):
+        _reset_mails()
+        sock, r, w = _dial((SMTP_HOST, SMTP_PORT))
+        try:
+            resp = _smtp_auth_login(r, w, "testuser_552", "testpass_552")
+            self.assertIn("235", resp)
+            _write(w, "MAIL FROM:<a@b>")
+            _read(r)
+            _write(w, "RCPT TO:<c@d>")
+            _read(r)
+            _write(w, "DATA")
+            _read(r)
+            _write(w, "quota test body")
+            _write(w, ".")
+            resp = _read(r)
+            self.assertIn("552", resp)
+            self.assertIn("5.2.2", resp)
+            self.assertEqual(storage.count_mails(), 0)
+        finally:
+            sock.close()
+
 
 ###############################################################################
 # IMAP-Hilfsfunktionen
@@ -472,6 +532,46 @@ class IMAPTests(unittest.TestCase):
             _write(w, "A2 XYZZY")
             resp = _read(r)
             self.assertIn("BAD", resp)
+        finally:
+            sock.close()
+
+    def test_login_too_many(self):
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _read(r)
+            start = time.time()
+            _write(w, "A1 LOGIN testuser_421 testpass_421")
+            resp = _read(r)
+            elapsed = time.time() - start
+            self.assertIn("NO", resp)
+            self.assertIn("LIMIT", resp)
+            self.assertGreaterEqual(elapsed, 0.9)
+        finally:
+            sock.close()
+
+    def test_login_timeout(self):
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _read(r)
+            with patch("mailserver_mock.imap_server.time.sleep"):
+                _write(w, "A1 LOGIN testuser_451 testpass_451")
+                resp = _read(r)
+            self.assertIn("NO", resp)
+            self.assertIn("UNAVAILABLE", resp)
+        finally:
+            sock.close()
+
+    def test_login_quota_then_select(self):
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _read(r)
+            _write(w, "A1 LOGIN testuser_552 testpass_552")
+            resp = _read(r)
+            self.assertIn("OK", resp)
+            _write(w, "A2 SELECT INBOX")
+            resp = _read(r)
+            self.assertIn("NO", resp)
+            self.assertIn("OVERQUOTA", resp)
         finally:
             sock.close()
 
