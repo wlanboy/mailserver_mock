@@ -1,10 +1,10 @@
-"""File-based mail storage.
+"""Dateibasierte Mail-Speicherung.
 
-Every accepted mail is written as ``<id>.eml`` (raw RFC 5322 message) plus a
-sibling ``<id>.flags`` file (space separated IMAP flags) in MAIL_DIR. IDs are
-sequential integers starting at 1, mirroring the on-disk format of the
-gosmtp reference server so tooling built against one is compatible with the
-other.
+Jede angenommene Mail wird als ``<id>.eml`` (rohe RFC-5322-Nachricht) plus
+einer zugehörigen ``<id>.flags``-Datei (durch Leerzeichen getrennte IMAP-Flags)
+in MAIL_DIR geschrieben. IDs sind fortlaufende Ganzzahlen ab 1 und spiegeln
+damit das Dateiformat des gosmtp-Referenzservers, sodass Tooling für den einen
+auch mit dem anderen kompatibel ist.
 """
 import os
 from email import message_from_string
@@ -43,7 +43,7 @@ def count_mails():
 
 
 def save_mail(from_addr, to_addrs, raw):
-    """Store a raw DATA payload, synthesizing headers if none were sent."""
+    """Speichert einen rohen DATA-Payload und generiert Header, falls keine gesendet wurden."""
     msg_id = next_id()
 
     if "SUBJECT:" not in raw.upper():
@@ -55,8 +55,8 @@ def save_mail(from_addr, to_addrs, raw):
         )
         content = header + raw
     else:
-        # Ensure there is a blank line between headers and body even if the
-        # client didn't send one after its last header.
+        # Stellt sicher, dass eine Leerzeile zwischen Headern und Body steht,
+        # auch wenn der Client nach dem letzten Header keine gesendet hat.
         header_ended = False
         fixed = []
         for line in raw.split("\n"):
@@ -115,7 +115,7 @@ def _format_addr_list(msg, header_name):
 
 
 def get_envelope(raw):
-    """Build an IMAP ENVELOPE structure for a stored message."""
+    """Baut eine IMAP-ENVELOPE-Struktur für eine gespeicherte Nachricht."""
     if not raw.strip():
         return '(NIL "Format Error: Missing Blank Line" NIL NIL NIL NIL NIL NIL NIL NIL)'
 
