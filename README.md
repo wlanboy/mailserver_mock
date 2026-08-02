@@ -51,9 +51,9 @@ SASL-Continuation, wie z. B. Jakarta Mail/Spring Boot es nutzt), `MAIL FROM`,
 `QUIT`, Auth-Pflicht vor `MAIL FROM`/`RCPT TO`/`DATA`, mehrere Mails pro
 Session.
 
-**IMAP:** `CAPABILITY`, `LOGIN`, `LIST`, `SELECT`, `FETCH`, `UID FETCH`,
-`UID SEARCH`, `STORE` (`FLAGS`/`+FLAGS`/`-FLAGS`, inkl. `.SILENT`),
-`SEARCH`, `IDLE`, `LOGOUT`.
+**IMAP:** `CAPABILITY`, `LOGIN`, `LIST`, `SELECT`, `STATUS`, `FETCH`,
+`UID FETCH`, `UID SEARCH`, `STORE` (`FLAGS`/`+FLAGS`/`-FLAGS`, inkl.
+`.SILENT`), `SEARCH`, `IDLE`, `LOGOUT`.
 
 ## Installation & Start
 

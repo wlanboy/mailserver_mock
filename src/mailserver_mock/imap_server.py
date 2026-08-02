@@ -111,6 +111,12 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 self._write("* OK [PERMANENTFLAGS (\\Seen \\Deleted \\Answered)]")
                 self._write(f"{tag} OK [READ-WRITE] SELECT completed")
 
+            elif cmd == "STATUS":
+                if not self.auth:
+                    self._write(f"{tag} NO Authenticate first")
+                    continue
+                self._handle_status(tag, args)
+
             elif cmd == "UID":
                 if not self.auth:
                     self._write(f"{tag} NO Authenticate first")
@@ -174,6 +180,35 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         time.sleep(float(account.get("delay_seconds", 0)))
         response = _format_response_code(account.get("imap", {}), "UNAVAILABLE", "Temporary failure, please try again later")
         self._write(f"{tag} NO {response}")
+
+    def _handle_status(self, tag, args):
+        paren_start = args.find("(")
+        paren_end = args.rfind(")")
+        if paren_start == -1 or paren_end == -1 or paren_end < paren_start:
+            self._write(f"{tag} BAD STATUS syntax")
+            return
+
+        mailbox = args[:paren_start].strip().strip('"') or "INBOX"
+        items = args[paren_start + 1 : paren_end].split()
+
+        count = storage.count_mails()
+        unseen = sum(1 for i in range(1, count + 1) if "\\Seen" not in storage.load_flags(i))
+        values = {
+            "MESSAGES": count,
+            "RECENT": 0,
+            "UIDNEXT": storage.next_id(),
+            "UIDVALIDITY": 1,
+            "UNSEEN": unseen,
+        }
+
+        result = []
+        for item in items:
+            key = item.upper()
+            if key in values:
+                result.append(f"{key} {values[key]}")
+
+        self._write(f'* STATUS "{mailbox}" ({" ".join(result)})')
+        self._write(f"{tag} OK STATUS completed")
 
     def _handle_uid(self, tag, args):
         parts = args.split(" ", 1)

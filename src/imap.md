@@ -103,6 +103,32 @@ definiert.
 `EXAMINE` (read-only-Variante von `SELECT`, RFC 3501 §6.3.2) ist **nicht**
 implementiert.
 
+### STATUS (RFC 3501 §6.3.10)
+
+```
+a STATUS <mailbox> (MESSAGES RECENT UIDNEXT UIDVALIDITY UNSEEN)
+* STATUS "<mailbox>" (MESSAGES <n> RECENT 0 UIDNEXT <n+1> UIDVALIDITY 1 UNSEEN <u>)
+a OK STATUS completed
+```
+
+Erlaubt Abfragen der Mailbox-Metadaten **ohne** vorheriges `SELECT` — der
+Client bekommt nur `auth` geprüft, keinen Mailbox-Namen validiert. Wie bei
+`SELECT`/`LIST` gibt es nur eine (implizite) Mailbox, der übergebene
+Mailbox-Name wird lediglich in der Antwort gespiegelt, nicht ausgewertet.
+Unterstützte Items:
+
+- `MESSAGES` — `storage.count_mails()`, identisch zu `SELECT`s `EXISTS`.
+- `RECENT` — immer `0`, da der Mock kein `\Recent`-Flag nachbildet.
+- `UIDNEXT` — `storage.next_id()`.
+- `UIDVALIDITY` — konstant `1`, da die (einzige) Mailbox nie neu angelegt
+  wird und UIDs nie invalidiert werden.
+- `UNSEEN` — Anzahl der Nachrichten, deren gespeicherte Flags **kein**
+  `\Seen` enthalten (linear über `storage.load_flags` pro Nachricht
+  ermittelt, kein Caching).
+
+Unbekannte Items (z. B. aus zukünftigen RFC-Extensions) werden stillschweigend
+ignoriert statt mit `BAD` abgelehnt.
+
 ### FETCH (RFC 3501 §6.4.5)
 
 ```
@@ -225,7 +251,6 @@ den generischen `else`-Zweig mit `<tag> BAD Unknown command` beantwortet:
 | `EXAMINE` | RFC 3501 §6.3.2 | Kein Unterschied zwischen Read-Write und Read-Only-Zustand nötig für Testzwecke. |
 | `CREATE` / `DELETE` / `RENAME` | RFC 3501 §6.3.3–6.3.5 | Es gibt nur eine feste Mailbox (`INBOX`); Mailbox-Verwaltung ist out of scope. |
 | `SUBSCRIBE` / `UNSUBSCRIBE` / `LSUB` | RFC 3501 §6.3.6/6.3.7/6.3.9 | Keine Mehrfach-Mailbox-Verwaltung vorhanden. |
-| `STATUS` | RFC 3501 §6.3.10 | Kein Bedarf, da `SELECT` bereits die Nachrichtenanzahl liefert. |
 | `APPEND` | RFC 3501 §6.3.11 | Mails werden ausschließlich per SMTP eingeliefert, nicht direkt per IMAP hochgeladen. |
 | `CHECK` | RFC 3501 §6.4.1 | No-Op laut RFC, für den Mock ohne Nutzen. |
 | `CLOSE` | RFC 3501 §6.4.2 | Da `EXPUNGE` nicht implementiert ist (siehe unten), hat `CLOSE` (das implizit expunged) keinen sinnvollen Effekt. |
