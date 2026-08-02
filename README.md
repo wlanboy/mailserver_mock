@@ -15,7 +15,33 @@ Minimaler SMTP- und IMAP-Mock-Server für lokale Tests, in reinem Python
 Standard-Zugangsdaten: `testuser` / `testpass`
 
 Alle Werte lassen sich per Umgebungsvariable überschreiben:
-`SMTP_HOST`, `SMTP_PORT`, `IMAP_HOST`, `IMAP_PORT`, `MAIL_USER`, `MAIL_PASS`, `MAIL_DIR`.
+`SMTP_HOST`, `SMTP_PORT`, `IMAP_HOST`, `IMAP_PORT`, `MAIL_USER`, `MAIL_PASS`, `MAIL_DIR`, `USERS_FILE`.
+
+## Test-User & simulierte Fehlerszenarien (`users.json`)
+
+Zugangsdaten werden aus `users.json` (Pfad überschreibbar via `USERS_FILE`,
+Default `./users.json`) geladen. Fehlt die Datei, wird ein einzelner
+Normal-User aus `MAIL_USER`/`MAIL_PASS` gebildet (Abwärtskompatibilität).
+
+Jeder Eintrag hat `username`, `password` und `behavior`. Neben `normal`
+stehen drei Verhaltensweisen bereit, die einen Fehler nach RFC-Vorgabe für
+SMTP und IMAP gleichermaßen simulieren:
+
+| User               | Verhalten                                    | SMTP-Antwort        | IMAP-Antwortcode    |
+|--------------------|-----------------------------------------------|----------------------|----------------------|
+| `testuser`         | normaler Login, wie bisher                    | `235`                | `OK`                 |
+| `testuser_421`      | nach 1s Verzögerung: zu viele Fehler/Anfragen | `421 4.7.0`          | `NO [LIMIT]`         |
+| `testuser_451`      | nach 60s keine Antwort, dann Timeout          | `451 4.4.2`          | `NO [UNAVAILABLE]`   |
+| `testuser_552`      | Login gelingt, danach Quota-Fehler            | `552 5.2.2`          | `NO [OVERQUOTA]`     |
+
+Bei `testuser_421`/`testuser_451` schlägt der Login selbst fehl (nach der
+konfigurierten Verzögerung) und die Verbindung wird geschlossen. Bei
+`testuser_552` gelingt der Login, aber SMTP `DATA` (nach dem
+abschließenden `.`) bzw. IMAP `SELECT` liefern den Quota-Fehler.
+
+Jeder Eintrag kann `smtp`/`imap`-Objekte mit `code`/`enhanced_code`/
+`message` (SMTP) bzw. `response_code`/`message` (IMAP) sowie
+`delay_seconds` zur Anpassung mitgeben, siehe `users.json` im Repo-Root.
 
 ## Unterstützte Funktionen
 
@@ -113,11 +139,13 @@ m.logout()
 ## Projektstruktur
 
 ```
+users.json            — Test-User samt simulierten Fehlerszenarien (siehe oben)
 src/mailserver_mock/
     server.py        — startet SMTP- und IMAP-Listener in Threads
     smtp_server.py    — SMTP-Protokoll-Handler
     imap_server.py    — IMAP-Protokoll-Handler
     storage.py        — Dateibasierte Ablage in mails/ (.eml + .flags)
+    users.py          — lädt Test-User aus users.json
 scripts/
     send_test_mail.sh — Sendet per curl eine Test-Mail per SMTP
 tests/
