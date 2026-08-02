@@ -170,7 +170,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             return
 
         # too_many / timeout: verzögerte temporäre Fehlerantwort statt Login-Erfolg
-        time.sleep(account.get("delay_seconds", 0))
+        time.sleep(float(account.get("delay_seconds", 0)))
         response = _format_response_code(account.get("imap", {}), "UNAVAILABLE", "Temporary failure, please try again later")
         self._write(f"{tag} NO {response}")
 

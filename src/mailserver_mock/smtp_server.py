@@ -59,7 +59,7 @@ class SMTPHandler(socketserver.StreamRequestHandler):
             return True, account.get("smtp", {}), False
 
         # too_many / timeout: verzögerte temporäre Fehlerantwort, danach Verbindungsabbau
-        time.sleep(account.get("delay_seconds", 0))
+        time.sleep(float(account.get("delay_seconds", 0)))
         message = _format_error(
             account.get("smtp", {}), "421", "4.7.0", "Service not available, closing transmission channel"
         )
