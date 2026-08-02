@@ -12,5 +12,5 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MAIL_USER="${MAIL_USER:-testuser_451}" \
-MAIL_PASS="${MAIL_PASS:-testpass}" \
+MAIL_PASS="${MAIL_PASS:-testpass_451}" \
 exec "${SCRIPT_DIR}/send_test_mail.sh" "$@"
