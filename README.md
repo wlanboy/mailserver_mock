@@ -107,6 +107,17 @@ Sendet eine Test-Mail per curl per SMTP. Konfiguration über die
 Umgebungsvariablen `SMTP_HOST`, `SMTP_PORT`, `MAIL_USER`, `MAIL_PASS`,
 `MAIL_FROM`, `MAIL_TO`.
 
+Für jeden Test-User aus `users.json` gibt es zusätzlich ein Wrapper-Script,
+das `MAIL_USER`/`MAIL_PASS` passend vorbelegt und die simulierten
+Fehlerszenarien direkt testbar macht:
+
+```bash
+./scripts/send_test_mail_testuser.sh       # normal
+./scripts/send_test_mail_testuser_421.sh   # too_many (SMTP 421)
+./scripts/send_test_mail_testuser_451.sh   # timeout (SMTP 451, ~60s Verzoegerung)
+./scripts/send_test_mail_testuser_552.sh   # quota (SMTP 552)
+```
+
 ## Manueller Test mit den Python-Standardbibliotheken
 
 ```python
@@ -136,18 +147,3 @@ typ, data = m.fetch(ids[0].split()[-1], "(FLAGS BODY[])")
 m.logout()
 ```
 
-## Projektstruktur
-
-```
-users.json            — Test-User samt simulierten Fehlerszenarien (siehe oben)
-src/mailserver_mock/
-    server.py        — startet SMTP- und IMAP-Listener in Threads
-    smtp_server.py    — SMTP-Protokoll-Handler
-    imap_server.py    — IMAP-Protokoll-Handler
-    storage.py        — Dateibasierte Ablage in mails/ (.eml + .flags)
-    users.py          — lädt Test-User aus users.json
-scripts/
-    send_test_mail.sh — Sendet per curl eine Test-Mail per SMTP
-tests/
-    test_mailserver.py — End-to-End-Socket-Tests für SMTP + IMAP
-```
