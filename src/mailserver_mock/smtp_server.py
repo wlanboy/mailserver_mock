@@ -4,15 +4,13 @@ import binascii
 import logging
 import os
 import socketserver
+import time
 from email import message_from_string
 
-from . import storage
+from . import storage, users
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "127.0.0.1")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "1025"))
-
-USER = os.environ.get("MAIL_USER", "testuser")
-PASS = os.environ.get("MAIL_PASS", "testpass")
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +20,13 @@ def _b64decode(s):
         return base64.b64decode(s).decode("utf-8", errors="replace")
     except (binascii.Error, ValueError):
         return ""
+
+
+def _format_error(cfg, default_code, default_enhanced, default_message):
+    code = cfg.get("code", default_code)
+    enhanced = cfg.get("enhanced_code", default_enhanced)
+    message = cfg.get("message", default_message)
+    return f"{code} {enhanced} {message}".strip()
 
 
 class SMTPHandler(socketserver.StreamRequestHandler):
@@ -34,10 +39,38 @@ class SMTPHandler(socketserver.StreamRequestHandler):
             return None
         return line.decode("utf-8", errors="replace")
 
+    def _login(self, username, password):
+        """Prüft Zugangsdaten gegen users.json und wendet Test-Fehlerverhalten an.
+
+        Rückgabe: (auth_ok, quota_error_config, close_connection).
+        """
+        account = users.find_user(username)
+        if account is None or account.get("password") != password:
+            self._write("535 Authentication failed")
+            return False, None, False
+
+        behavior = account.get("behavior", "normal")
+        if behavior == "normal":
+            self._write("235 Authentication successful")
+            return True, None, False
+
+        if behavior == "quota":
+            self._write("235 Authentication successful")
+            return True, account.get("smtp", {}), False
+
+        # too_many / timeout: verzögerte temporäre Fehlerantwort, danach Verbindungsabbau
+        time.sleep(account.get("delay_seconds", 0))
+        message = _format_error(
+            account.get("smtp", {}), "421", "4.7.0", "Service not available, closing transmission channel"
+        )
+        self._write(message)
+        return False, None, True
+
     def handle(self):
         self._write("220 localhost ESMTP ready")
 
         auth = False
+        quota_error = None
         mail_from = ""
         rcpt_to = []
         data_mode = False
@@ -54,21 +87,24 @@ class SMTPHandler(socketserver.StreamRequestHandler):
 
             if data_mode:
                 if cmd == ".":
-                    msg_id = storage.save_mail(mail_from, rcpt_to, "".join(data_lines))
-                    raw = storage.load_mail(msg_id)
-                    headers = message_from_string(raw)
-                    logger.info(
-                        "incoming id=%s from=%s to=%s subject=%r",
-                        msg_id,
-                        headers.get("From", mail_from),
-                        headers.get("To", ", ".join(rcpt_to)),
-                        headers.get("Subject", ""),
-                    )
+                    if quota_error:
+                        self._write(_format_error(quota_error, "552", "5.2.2", "Mailbox full, quota exceeded"))
+                    else:
+                        msg_id = storage.save_mail(mail_from, rcpt_to, "".join(data_lines))
+                        raw = storage.load_mail(msg_id)
+                        headers = message_from_string(raw)
+                        logger.info(
+                            "incoming id=%s from=%s to=%s subject=%r",
+                            msg_id,
+                            headers.get("From", mail_from),
+                            headers.get("To", ", ".join(rcpt_to)),
+                            headers.get("Subject", ""),
+                        )
+                        self._write("250 Message accepted")
                     data_lines = []
                     data_mode = False
                     mail_from = ""
                     rcpt_to = []
-                    self._write("250 Message accepted")
                 else:
                     # RFC 5321 Dot-Stuffing: hebt das führende-Punkt-Escaping des Clients wieder auf.
                     stripped = cmd[1:] if cmd.startswith(".") else cmd
@@ -106,11 +142,9 @@ class SMTPHandler(socketserver.StreamRequestHandler):
                     return
                 password = _b64decode(p64.strip())
 
-                if user == USER and password == PASS:
-                    auth = True
-                    self._write("235 Authentication successful")
-                else:
-                    self._write("535 Authentication failed")
+                auth, quota_error, close = self._login(user, password)
+                if close:
+                    return
 
             elif upper.startswith("AUTH PLAIN"):
                 parts = cmd.split(" ")
@@ -129,11 +163,13 @@ class SMTPHandler(socketserver.StreamRequestHandler):
 
                 decoded = _b64decode(initial_response)
                 fields = decoded.split("\x00")
-                if len(fields) == 3 and fields[1] == USER and fields[2] == PASS:
-                    auth = True
-                    self._write("235 Authentication successful")
-                else:
+                if len(fields) != 3:
                     self._write("535 Authentication failed")
+                    continue
+
+                auth, quota_error, close = self._login(fields[1], fields[2])
+                if close:
+                    return
 
             elif upper.startswith("MAIL FROM:"):
                 if not auth:

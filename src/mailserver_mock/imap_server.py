@@ -2,17 +2,21 @@
 import logging
 import os
 import socketserver
+import time
 from email import message_from_string
 
-from . import storage
+from . import storage, users
 
 IMAP_HOST = os.environ.get("IMAP_HOST", "127.0.0.1")
 IMAP_PORT = int(os.environ.get("IMAP_PORT", "1143"))
 
-USER = os.environ.get("MAIL_USER", "testuser")
-PASS = os.environ.get("MAIL_PASS", "testpass")
-
 logger = logging.getLogger(__name__)
+
+
+def _format_response_code(cfg, default_code, default_message):
+    code = cfg.get("response_code", default_code)
+    message = cfg.get("message", default_message)
+    return f"[{code}] {message}"
 
 
 def _parse_seq_id(s, max_id):
@@ -61,6 +65,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         self._write("* OK IMAP4rev1 Service Ready")
 
         self.auth = False
+        self.quota_error = None
 
         while True:
             line = self._read()
@@ -84,11 +89,10 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             elif cmd == "LOGIN":
                 clean = args.replace('"', "")
                 a = clean.split()
-                if len(a) == 2 and a[0] == USER and a[1] == PASS:
-                    self.auth = True
-                    self._write(f"{tag} OK LOGIN completed")
-                else:
-                    self._write(f"{tag} NO LOGIN failed")
+                if len(a) != 2:
+                    self._write(f"{tag} BAD LOGIN syntax")
+                    continue
+                self._handle_login(tag, a[0], a[1])
 
             elif cmd == "LIST":
                 self._write('* LIST (\\HasNoChildren) "/" "INBOX"')
@@ -97,6 +101,9 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             elif cmd == "SELECT":
                 if not self.auth:
                     self._write(f"{tag} NO Authenticate first")
+                    continue
+                if self.quota_error:
+                    self._write(f"{tag} NO {_format_response_code(self.quota_error, 'OVERQUOTA', 'Quota exceeded')}")
                     continue
                 count = storage.count_mails()
                 self._write(f"* {count} EXISTS")
@@ -143,6 +150,29 @@ class IMAPHandler(socketserver.StreamRequestHandler):
 
             else:
                 self._write(f"{tag} BAD Unknown command")
+
+    def _handle_login(self, tag, username, password):
+        account = users.find_user(username)
+        if account is None or account.get("password") != password:
+            self._write(f"{tag} NO LOGIN failed")
+            return
+
+        behavior = account.get("behavior", "normal")
+        if behavior == "normal":
+            self.auth = True
+            self._write(f"{tag} OK LOGIN completed")
+            return
+
+        if behavior == "quota":
+            self.auth = True
+            self.quota_error = account.get("imap", {})
+            self._write(f"{tag} OK LOGIN completed")
+            return
+
+        # too_many / timeout: verzögerte temporäre Fehlerantwort statt Login-Erfolg
+        time.sleep(account.get("delay_seconds", 0))
+        response = _format_response_code(account.get("imap", {}), "UNAVAILABLE", "Temporary failure, please try again later")
+        self._write(f"{tag} NO {response}")
 
     def _handle_uid(self, tag, args):
         parts = args.split(" ", 1)
