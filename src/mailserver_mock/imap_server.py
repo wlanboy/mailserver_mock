@@ -149,6 +149,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 return
 
             else:
+                logger.warning("unhandled command cmd=%s args=%r", cmd, args)
                 self._write(f"{tag} BAD Unknown command")
 
     def _handle_login(self, tag, username, password):
@@ -190,6 +191,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         elif sub == "SEARCH":
             self._handle_search(tag)
         else:
+            logger.warning("unhandled UID subcommand sub=%s args=%r", sub, args)
             self._write(f"{tag} BAD UID command not supported")
 
     def _handle_fetch(self, tag, args):
