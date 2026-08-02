@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "wlanboy", email = "wlanboy@githumb.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]
@@ -15,3 +15,8 @@ mailserver-mock = "mailserver_mock:main"
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+]
