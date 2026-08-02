@@ -204,6 +204,7 @@ class SMTPHandler(socketserver.StreamRequestHandler):
                 return
 
             else:
+                logger.warning("unhandled command line=%r", cmd)
                 self._write("502 Command not implemented")
 
 
