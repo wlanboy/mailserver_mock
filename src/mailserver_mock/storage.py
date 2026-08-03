@@ -7,11 +7,14 @@ damit das Dateiformat des gosmtp-Referenzservers, sodass Tooling für den einen
 auch mit dem anderen kompatibel ist.
 """
 import os
+import threading
 from email import message_from_string
 from email.utils import formatdate, getaddresses
 from pathlib import Path
 
 MAIL_DIR = Path(os.environ.get("MAIL_DIR", "mails"))
+
+_lock = threading.Lock()
 
 
 def ensure_mail_dir():
@@ -44,37 +47,46 @@ def count_mails():
 
 def save_mail(from_addr, to_addrs, raw):
     """Speichert einen rohen DATA-Payload und generiert Header, falls keine gesendet wurden."""
-    msg_id = next_id()
-
     if "SUBJECT:" not in raw.upper():
-        header = (
-            f"From: {from_addr}\r\n"
-            f"To: {', '.join(to_addrs)}\r\n"
-            f"Subject: Mock Mail {msg_id}\r\n"
+        header_template = (
+            "From: {from_addr}\r\n"
+            "To: {to_addrs}\r\n"
+            "Subject: Mock Mail {msg_id}\r\n"
             f"Date: {formatdate(localtime=False)}\r\n\r\n"
         )
-        content = header + raw
     else:
-        # Stellt sicher, dass eine Leerzeile zwischen Headern und Body steht,
-        # auch wenn der Client nach dem letzten Header keine gesendet hat.
-        header_ended = False
-        fixed = []
-        for line in raw.split("\n"):
-            trimmed = line.strip()
-            if not header_ended and trimmed != "" and ":" not in line:
-                fixed.append("\r\n")
-                header_ended = True
-            if trimmed == "":
-                header_ended = True
-            fixed.append(line + "\n")
-        content = "".join(fixed)
+        header_template = None
 
-    content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+    # next_id() (Verzeichnis-Scan) und das Anlegen der Datei müssen atomar
+    # zusammen ablaufen, sonst können zwei parallele Sessions (Threading-
+    # Server!) dieselbe ID berechnen und sich gegenseitig überschreiben.
+    with _lock:
+        msg_id = next_id()
 
-    with open(_eml_path(msg_id), "w", encoding="utf-8", newline="") as f:
-        f.write(content)
-    _flags_path(msg_id).write_text("", encoding="utf-8")
-    return msg_id
+        if header_template is not None:
+            header = header_template.format(from_addr=from_addr, to_addrs=", ".join(to_addrs), msg_id=msg_id)
+            content = header + raw
+        else:
+            # Stellt sicher, dass eine Leerzeile zwischen Headern und Body steht,
+            # auch wenn der Client nach dem letzten Header keine gesendet hat.
+            header_ended = False
+            fixed = []
+            for line in raw.split("\n"):
+                trimmed = line.strip()
+                if not header_ended and trimmed != "" and ":" not in line:
+                    fixed.append("\r\n")
+                    header_ended = True
+                if trimmed == "":
+                    header_ended = True
+                fixed.append(line + "\n")
+            content = "".join(fixed)
+
+        content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+
+        with open(_eml_path(msg_id), "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        _flags_path(msg_id).write_text("", encoding="utf-8")
+        return msg_id
 
 
 def load_flags(msg_id):

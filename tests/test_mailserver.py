@@ -6,6 +6,7 @@ import base64
 import os
 import socket
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -44,6 +45,32 @@ def _read(r):
 def _write(w, s):
     w.write((s + "\r\n").encode("utf-8"))
     w.flush()
+
+
+###############################################################################
+# Storage-Tests
+###############################################################################
+
+class StorageConcurrencyTests(unittest.TestCase):
+    def test_concurrent_save_mail_assigns_unique_ids(self):
+        """Regressionstest: next_id()+Schreiben liefen früher ohne Lock ab, wodurch
+        parallele Sessions dieselbe ID berechnen und sich gegenseitig überschreiben
+        konnten (ThreadingTCPServer bedient Verbindungen in eigenen Threads)."""
+        _reset_mails()
+        n = 20
+        barrier = threading.Barrier(n)
+
+        def send(i):
+            barrier.wait()
+            storage.save_mail(f"<sender{i}@example.com>", [f"<rcpt{i}@example.com>"], f"body {i}")
+
+        threads = [threading.Thread(target=send, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(storage.count_mails(), n)
 
 
 ###############################################################################
