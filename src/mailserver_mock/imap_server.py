@@ -2,6 +2,7 @@
 import logging
 import os
 import re
+import shlex
 import socketserver
 import time
 from email import message_from_string
@@ -50,6 +51,41 @@ def _parse_seq_set(seq_set, max_id):
             if 0 < i <= max_id:
                 ids.append(i)
     return sorted(set(ids))
+
+
+_FLAG_SEARCH_KEYS = {
+    "ANSWERED": "\\Answered",
+    "DELETED": "\\Deleted",
+    "DRAFT": "\\Draft",
+    "FLAGGED": "\\Flagged",
+    "SEEN": "\\Seen",
+}
+_TEXT_SEARCH_KEYS = {
+    "SUBJECT": "Subject",
+    "FROM": "From",
+    "TO": "To",
+    "CC": "Cc",
+    "BCC": "Bcc",
+}
+
+
+def _tokenize_search(args):
+    try:
+        return shlex.split(args)
+    except ValueError:
+        return args.split()
+
+
+def _search_text_matches(msg_id, key, needle):
+    raw = storage.load_mail(msg_id)
+    msg = message_from_string(raw)
+    if key == "TEXT":
+        haystack = raw
+    elif key == "BODY":
+        haystack = str(msg.get_payload() or "")
+    else:
+        haystack = msg.get(_TEXT_SEARCH_KEYS[key], "")
+    return needle in haystack.lower()
 
 
 def _fetch_marks_seen(items):
@@ -153,7 +189,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 if not self.auth:
                     self._write(f"{tag} NO Authenticate first")
                     continue
-                self._handle_search(tag)
+                self._handle_search(tag, args)
 
             elif cmd == "IDLE":
                 if not self.auth:
@@ -238,7 +274,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 return
             self._handle_fetch(tag, parts[1])
         elif sub == "SEARCH":
-            self._handle_search(tag)
+            self._handle_search(tag, parts[1] if len(parts) > 1 else "")
         elif sub == "STORE":
             if len(parts) < 2:
                 self._write(f"{tag} BAD UID STORE syntax")
@@ -321,10 +357,57 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 self._write(f"* {msg_num} FETCH (FLAGS ({' '.join(current)}))")
         self._write(f"{tag} OK STORE completed")
 
-    def _handle_search(self, tag):
-        count = storage.count_mails()
-        ids = [str(i) for i in range(1, count + 1)]
-        self._write("* SEARCH " + " ".join(ids))
+    def _handle_search(self, tag, args=""):
+        """Wertet eine Teilmenge der RFC-3501-SEARCH-Kriterien aus.
+
+        Unterstützt: ALL, (UN)SEEN, (UN)ANSWERED, (UN)DELETED, (UN)FLAGGED,
+        (UN)DRAFT, NEW, OLD, RECENT, UID <seq-set>, SUBJECT/FROM/TO/CC/BCC/
+        BODY/TEXT <string> sowie nackte Sequence-Sets. Mehrere Kriterien
+        werden UND-verknüpft. NOT/OR/Datumskriterien werden nicht ausgewertet
+        (unbekannte Tokens filtern nicht, statt einen Fehler zu werfen).
+        """
+        max_id = storage.count_mails()
+        ids = list(range(1, max_id + 1))
+
+        tokens = _tokenize_search(args)
+        i = 0
+        while i < len(tokens):
+            key = tokens[i].upper()
+            if key == "ALL":
+                i += 1
+            elif key in _FLAG_SEARCH_KEYS:
+                flag = _FLAG_SEARCH_KEYS[key]
+                ids = [n for n in ids if flag in storage.load_flags(n)]
+                i += 1
+            elif key.startswith("UN") and key[2:] in _FLAG_SEARCH_KEYS:
+                flag = _FLAG_SEARCH_KEYS[key[2:]]
+                ids = [n for n in ids if flag not in storage.load_flags(n)]
+                i += 1
+            elif key == "NEW":
+                ids = [n for n in ids if "\\Seen" not in storage.load_flags(n)]
+                i += 1
+            elif key == "OLD":
+                i += 1  # kein \Recent-Tracking -> jede Mail gilt als "old"
+            elif key == "RECENT":
+                ids = []  # kein \Recent-Tracking -> nie ein Treffer
+                i += 1
+            elif key == "UID" and i + 1 < len(tokens):
+                wanted = set(_parse_seq_set(tokens[i + 1], max_id))
+                ids = [n for n in ids if n in wanted]
+                i += 2
+            elif key in _TEXT_SEARCH_KEYS or key in ("BODY", "TEXT"):
+                if i + 1 >= len(tokens):
+                    i += 1
+                    continue
+                needle = tokens[i + 1].lower()
+                ids = [n for n in ids if _search_text_matches(n, key, needle)]
+                i += 2
+            else:
+                seq = _parse_seq_set(tokens[i], max_id)
+                ids = [n for n in ids if n in set(seq)] if seq else ids
+                i += 1
+
+        self._write("* SEARCH " + " ".join(str(n) for n in ids))
         self._write(f"{tag} OK SEARCH completed")
 
 

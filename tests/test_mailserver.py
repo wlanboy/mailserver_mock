@@ -483,6 +483,36 @@ class IMAPTests(unittest.TestCase):
         finally:
             sock.close()
 
+    def test_search_unseen_excludes_seen_mail(self):
+        """Regressionstest: SEARCH UNSEEN lieferte früher exakt dieselbe Liste
+        wie SEARCH ALL, weil die Suchkriterien nie an _handle_search
+        durchgereicht wurden (imap_server.py)."""
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "unseen test body")
+        _smtp_send_mail("<a@b>", "<c@d>", "seen test body")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            _imap_select(r, w, "A2")
+            _write(w, r"A3 STORE 2 +FLAGS (\Seen)")
+            _read(r)
+            _read(r)
+
+            _write(w, "A4 SEARCH ALL")
+            all_line = _read(r)
+            _read(r)
+            self.assertIn("1", all_line.split())
+            self.assertIn("2", all_line.split())
+
+            _write(w, "A5 SEARCH UNSEEN")
+            unseen_line = _read(r)
+            resp = _read(r)
+            self.assertIn("1", unseen_line.split())
+            self.assertNotIn("2", unseen_line.split())
+            self.assertIn("OK", resp)
+        finally:
+            sock.close()
+
     def test_fetch(self):
         _reset_mails()
         _smtp_send_mail("<sender@example.com>", "<rcpt@example.com>", "fetch test body")
