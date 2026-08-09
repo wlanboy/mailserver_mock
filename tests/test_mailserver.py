@@ -528,6 +528,71 @@ class IMAPTests(unittest.TestCase):
         finally:
             sock.close()
 
+    def test_uid_store(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "uid store body")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            _imap_select(r, w, "A2")
+            _write(w, r"A3 UID STORE 1 +FLAGS (\Seen)")
+            fetch_line = _read(r)  # * 1 FETCH (FLAGS (\Seen) UID 1)
+            resp = _read(r)
+            self.assertIn(r"\Seen", fetch_line)
+            self.assertIn("UID 1", fetch_line)
+            self.assertIn("OK", resp)
+
+            flags = storage.load_flags(1)
+            self.assertIn(r"\Seen", flags)
+        finally:
+            sock.close()
+
+    def test_uid_store_silent(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "uid store silent body")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            _imap_select(r, w, "A2")
+            _write(w, r"A3 UID STORE 1 +FLAGS.SILENT (\Seen)")
+            resp = _read(r)  # keine unsolicited FETCH-Response, direkt OK
+            self.assertIn("OK", resp)
+
+            flags = storage.load_flags(1)
+            self.assertIn(r"\Seen", flags)
+        finally:
+            sock.close()
+
+    def test_fetch_body_marks_seen(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "fetch marks seen body")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            _imap_select(r, w, "A2")
+            _write(w, "A3 FETCH 1 (FLAGS BODY[])")
+            _imap_read_until(r, "A3")
+
+            flags = storage.load_flags(1)
+            self.assertIn(r"\Seen", flags)
+        finally:
+            sock.close()
+
+    def test_fetch_body_peek_does_not_mark_seen(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "fetch peek body")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            _imap_select(r, w, "A2")
+            _write(w, "A3 FETCH 1 (FLAGS BODY.PEEK[])")
+            _imap_read_until(r, "A3")
+
+            flags = storage.load_flags(1)
+            self.assertNotIn(r"\Seen", flags)
+        finally:
+            sock.close()
+
     def test_idle(self):
         sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
         try:

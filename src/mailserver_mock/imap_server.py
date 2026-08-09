@@ -1,6 +1,7 @@
 """Minimaler IMAP4rev1-Mock: LOGIN, LIST, SELECT, FETCH, UID, STORE, SEARCH, IDLE, LOGOUT."""
 import logging
 import os
+import re
 import socketserver
 import time
 from email import message_from_string
@@ -49,6 +50,19 @@ def _parse_seq_set(seq_set, max_id):
             if 0 < i <= max_id:
                 ids.append(i)
     return sorted(set(ids))
+
+
+def _fetch_marks_seen(items):
+    """Prüft, ob angefragte FETCH-Items laut RFC 3501 §6.4.5 implizit \\Seen setzen.
+
+    BODY.PEEK[...] und RFC822.HEADER/.SIZE setzen \\Seen nicht; jedes andere
+    BODY[...] sowie das nackte RFC822/RFC822.TEXT-Makro schon.
+    """
+    upper = items.upper()
+    without_peek = upper.replace("BODY.PEEK[", "")
+    if "BODY[" in without_peek:
+        return True
+    return bool(re.search(r"RFC822(?!\.(?:HEADER|SIZE))\b", upper))
 
 
 class IMAPHandler(socketserver.StreamRequestHandler):
@@ -225,21 +239,30 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             self._handle_fetch(tag, parts[1])
         elif sub == "SEARCH":
             self._handle_search(tag)
+        elif sub == "STORE":
+            if len(parts) < 2:
+                self._write(f"{tag} BAD UID STORE syntax")
+                return
+            self._handle_store(tag, parts[1], is_uid=True)
         else:
             logger.warning("unhandled UID subcommand sub=%s args=%r", sub, args)
             self._write(f"{tag} BAD UID command not supported")
 
     def _handle_fetch(self, tag, args):
-        fields = args.split()
+        fields = args.split(None, 1)
         if not fields:
             self._write(f"{tag} BAD FETCH syntax")
             return
 
         max_id = storage.count_mails()
         ids = _parse_seq_set(fields[0], max_id)
+        mark_seen = _fetch_marks_seen(fields[1] if len(fields) > 1 else "")
 
         for msg_id in ids:
             flags = storage.load_flags(msg_id)
+            if mark_seen and "\\Seen" not in flags:
+                flags.append("\\Seen")
+                storage.save_flags(msg_id, flags)
             body_str = storage.load_mail(msg_id)
             envelope = storage.get_envelope(body_str)
             body = body_str.encode("utf-8")
@@ -265,7 +288,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
 
         self._write(f"{tag} OK FETCH completed")
 
-    def _handle_store(self, tag, args):
+    def _handle_store(self, tag, args, is_uid=False):
         parts = args.split()
         if len(parts) < 3:
             self._write(f"{tag} BAD STORE syntax")
@@ -292,7 +315,10 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         storage.save_flags(msg_num, current)
 
         if ".SILENT" not in action:
-            self._write(f"* {msg_num} FETCH (FLAGS ({' '.join(current)}))")
+            if is_uid:
+                self._write(f"* {msg_num} FETCH (FLAGS ({' '.join(current)}) UID {msg_num})")
+            else:
+                self._write(f"* {msg_num} FETCH (FLAGS ({' '.join(current)}))")
         self._write(f"{tag} OK STORE completed")
 
     def _handle_search(self, tag):

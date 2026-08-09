@@ -137,10 +137,10 @@ a FETCH <sequence-set> <items>
 
 Der `<sequence-set>` wird über `_parse_seq_set` interpretiert (unterstützt
 Einzel-IDs, `*` für die höchste Nachrichtennummer, Bereiche `a:b` und
-Kommalisten, z. B. `1,3,5:7`). **Der `<items>`-Teil wird komplett
-ignoriert** — unabhängig davon, ob der Client `(FLAGS)`, `(BODY[HEADER])`
-oder `(RFC822.SIZE)` anfragt, liefert der Server für jede passende Nachricht
-immer denselben festen Datensatz:
+Kommalisten, z. B. `1,3,5:7`). Der `<items>`-Teil bestimmt **nicht**, welche
+Daten geliefert werden — unabhängig davon, ob der Client `(FLAGS)`,
+`(BODY[HEADER])` oder `(RFC822.SIZE)` anfragt, liefert der Server für jede
+passende Nachricht immer denselben festen Datensatz:
 
 ```
 * <id> FETCH (UID <id> FLAGS (...) ENVELOPE (...) BODY[] {<n>}
@@ -153,6 +153,15 @@ Damit sind insbesondere folgende FETCH-Items **nicht** unterstützt:
 `BODYSTRUCTURE`, `RFC822.SIZE`, `INTERNALDATE`. Clients, die gezielt nur
 Header oder nur einen Teilbereich abrufen wollen, bekommen trotzdem immer
 die komplette Nachricht.
+
+`<items>` wird aber ausgewertet, um zu entscheiden, ob die Nachricht
+implizit `\Seen` gesetzt bekommt (`_fetch_marks_seen` in `imap_server.py`,
+RFC 3501 §6.4.5): jedes `BODY[...]` ohne `.PEEK` sowie das nackte
+`RFC822`-/`RFC822.TEXT`-Makro markieren als gelesen und schreiben das
+aktualisierte Flag-Set über `storage.save_flags` zurück; `BODY.PEEK[...]`
+sowie `RFC822.HEADER`/`RFC822.SIZE` lassen `\Seen` unangetastet. Das ist die
+einzige Stelle, an der `<items>` das Serververhalten beeinflusst — welche
+konkreten Daten zurückgeliefert werden, bleibt davon unberührt.
 
 Die `ENVELOPE`-Struktur wird in
 [`storage.get_envelope`](src/mailserver_mock/storage.py) gebaut und folgt dem
@@ -169,17 +178,17 @@ a UID SEARCH <criteria>
 ```
 
 `UID FETCH` wird 1:1 an `_handle_fetch` durchgereicht, `UID SEARCH` an
-`_handle_search`. Das funktioniert nur deshalb korrekt, weil im Mock die
-Message-ID **gleichzeitig als Sequenznummer und als UID** verwendet wird
-(Nachrichten werden nie umnummeriert oder gelöscht/expunged, siehe unten) —
-echte IMAP-Server müssen UID und Sequenznummer sauber trennen, da UIDs über
+`_handle_search`, `UID STORE` an `_handle_store` (mit `is_uid=True`). Das
+funktioniert nur deshalb korrekt, weil im Mock die Message-ID
+**gleichzeitig als Sequenznummer und als UID** verwendet wird (Nachrichten
+werden nie umnummeriert oder gelöscht/expunged, siehe unten) — echte
+IMAP-Server müssen UID und Sequenznummer sauber trennen, da UIDs über
 Sessions stabil bleiben müssen, Sequenznummern aber nicht.
 
-**`UID STORE` ist nicht implementiert.** Der Dispatcher kennt für `UID` nur
-die Subcommands `FETCH` und `SEARCH`; `UID STORE ...` fällt in den
-`else`-Zweig und liefert `<tag> BAD UID command not supported`. Clients, die
-Flags ausschließlich über `UID STORE` setzen (viele tun das, um
-Sequenznummer-Drift zu vermeiden), funktionieren mit diesem Mock nicht.
+`UID STORE` unterscheidet sich von der Sequenznummer-Variante nur darin,
+dass die unsolicited `* <n> FETCH (...)`-Response (falls nicht `.SILENT`)
+zusätzlich `UID <n>` enthält, wie es RFC 3501 §6.4.8 für alle über `UID`
+ausgelösten `FETCH`-Antworten verlangt.
 
 ### STORE (RFC 3501 §6.4.6)
 

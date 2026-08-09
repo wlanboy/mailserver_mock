@@ -52,8 +52,9 @@ SASL-Continuation, wie z. B. Jakarta Mail/Spring Boot es nutzt), `MAIL FROM`,
 Session.
 
 **IMAP:** `CAPABILITY`, `LOGIN`, `LIST`, `SELECT`, `STATUS`, `FETCH`,
-`UID FETCH`, `UID SEARCH`, `STORE` (`FLAGS`/`+FLAGS`/`-FLAGS`, inkl.
-`.SILENT`), `SEARCH`, `IDLE`, `LOGOUT`.
+`UID FETCH`, `UID SEARCH`, `UID STORE`, `STORE` (`FLAGS`/`+FLAGS`/`-FLAGS`,
+inkl. `.SILENT`), `SEARCH`, `IDLE`, `LOGOUT`. `FETCH`/`UID FETCH` setzen
+`\Seen` implizit, außer bei `BODY.PEEK[...]` (RFC 3501 §6.4.5).
 
 ## Installation & Start
 
