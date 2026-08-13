@@ -56,6 +56,9 @@ Session.
 inkl. `.SILENT`), `SEARCH`, `IDLE`, `LOGOUT`. `FETCH`/`UID FETCH` setzen
 `\Seen` implizit, außer bei `BODY.PEEK[...]` (RFC 3501 §6.4.5).
 
+Ausführliche Beschreibung der jeweiligen RFC-Implementierung inkl. bewusst
+ausgelassener Teile: [`src/smtp.md`](src/smtp.md), [`src/imap.md`](src/imap.md).
+
 ## Installation & Start
 
 Mit [uv](https://docs.astral.sh/uv/) (empfohlen, `pyproject.toml` ist bereits konfiguriert):
@@ -81,6 +84,14 @@ Reines `unittest`, keine zusätzliche Abhängigkeit nötig:
 
 ```bash
 uv run python -m unittest discover -s tests -v
+```
+
+Die CI (`.github/workflows/ci.yml`) prüft zusätzlich mit Pyright die Typen
+und führt die Tests via `pytest` aus:
+
+```bash
+uv run pyright .
+uv run pytest
 ```
 
 ## Manueller Test mit swaks
@@ -118,6 +129,19 @@ Fehlerszenarien direkt testbar macht:
 ./scripts/send_test_mail_testuser_451.sh   # timeout (SMTP 451, ~60s Verzoegerung)
 ./scripts/send_test_mail_testuser_552.sh   # quota (SMTP 552)
 ```
+
+## Manueller Test der IMAP `\Seen`-Semantik
+
+```bash
+./scripts/test_imap_uid_store_and_seen.sh
+```
+
+Sendet per `send_test_mail_testuser.sh` eine Testmail und prüft anschließend
+per rohem IMAP-Dialog (`/dev/tcp`), dass `FETCH`/`UID FETCH` `\Seen` implizit
+setzen (außer bei `BODY.PEEK[...]`) und dass `UID STORE` die UID in der
+unsolicited FETCH-Antwort mitliefert (siehe [`src/imap.md`](src/imap.md)
+§6.4.5, §6.4.8). Voraussetzung: der Mock läuft bereits. Konfiguration über
+`IMAP_HOST`, `IMAP_PORT`.
 
 ## Manueller Test mit den Python-Standardbibliotheken
 
