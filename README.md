@@ -220,3 +220,48 @@ Alle vier Schritte (Image bauen/taggen/pushen, Helm-Upgrade, Rollout-Restart) fa
 ./update.sh
 ```
 
+### Deployment testen
+
+Voraussetzung: DNS für `mailmock.gmk.lan` zeigt auf die Istio-Ingress-Gateway-VIP, und deren Service
+exponiert zusätzlich die Ports 1025/1143 (siehe Hinweise in
+[`mailserver-mock-chart.md`](mailserver-mock-chart/mailserver-mock-chart.md)).
+
+SMTP-Test per `swaks` (siehe auch [oben](#manueller-test-mit-swaks)):
+
+```bash
+swaks \
+  --to "me@test.com" \
+  --from "you@test.com" \
+  --server mailmock.gmk.lan \
+  --port 1025 \
+  --auth-user testuser \
+  --auth-password testpass \
+  --body "This is the email body"
+```
+
+IMAP-Test per rohem Dialog (`/dev/tcp`), analog zu
+[`scripts/test_imap_uid_store_and_seen.sh`](scripts/test_imap_uid_store_and_seen.sh):
+
+```bash
+exec 3<>/dev/tcp/mailmock.gmk.lan/1143
+printf 'a1 LOGIN testuser testpass\r\n' >&3
+printf 'a2 SELECT INBOX\r\n' >&3
+printf 'a3 SEARCH ALL\r\n' >&3
+printf 'a4 LOGOUT\r\n' >&3
+timeout 2 cat <&3
+exec 3<&- 3>&-
+```
+
+Alternativ direkt aus einem Pod im Cluster gegen den `ClusterIP`-Service testen (kein Gateway nötig):
+
+```bash
+kubectl run mailtest --rm -it --restart=Never -n mailmock --image=debian:stable-slim -- \
+  bash -c "apt-get update -qq && apt-get install -y -qq swaks >/dev/null && \
+    swaks --to me@test.com --from you@test.com \
+      --server mailserver-mock-svc.mailmock.svc.cluster.local --port 1025 \
+      --auth-user testuser --auth-password testpass --body 'This is the email body'"
+```
+
+Erwartetes Ergebnis in beiden Fällen: SMTP meldet `235` bei Login und `250` nach `DATA`, die IMAP-Session
+liefert nach `LOGIN`/`SELECT`/`SEARCH ALL` mindestens eine Message-ID zurück.
+
