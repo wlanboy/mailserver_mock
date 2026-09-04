@@ -172,3 +172,51 @@ typ, data = m.fetch(ids[0].split()[-1], "(FLAGS BODY[])")
 m.logout()
 ```
 
+## Docker & Kubernetes (Helm)
+
+Container-Image, `update.sh` und das Helm-Chart [`mailserver-mock-chart/`](mailserver-mock-chart)
+liegen im Repo-Root. Details zum Chart (Werte, Istio-TCP-Gateway, Hinweise) stehen in
+[`mailserver-mock-chart/mailserver-mock-chart.md`](mailserver-mock-chart/mailserver-mock-chart.md).
+
+### Image bauen, taggen, veröffentlichen
+
+```bash
+docker build -t mailserver .
+docker tag mailserver registry.gmk.lan/mailserver:latest
+docker push registry.gmk.lan/mailserver:latest
+```
+
+### Chart installieren
+
+```bash
+kubectl create namespace mailmock
+kubectl label namespace mailmock istio-injection=enabled --overwrite
+helm install mailserver-mock ./mailserver-mock-chart -n mailmock --create-namespace
+```
+
+### Status prüfen
+
+```bash
+helm status mailserver-mock -n mailmock
+kubectl get pods,svc,gateway,virtualservice -n mailmock
+```
+
+### Chart aktualisieren
+
+```bash
+helm upgrade mailserver-mock ./mailserver-mock-chart -n mailmock
+```
+
+### Deployment neu ausrollen
+
+```bash
+kubectl rollout restart deployment/mailserver-mock -n mailmock
+```
+
+Alle vier Schritte (Image bauen/taggen/pushen, Helm-Upgrade, Rollout-Restart) fasst
+[`update.sh`](update.sh) zusammen:
+
+```bash
+./update.sh
+```
+

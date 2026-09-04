@@ -1,0 +1,41 @@
+image:
+  repository: registry.gmk.lan/mailserver
+  tag: latest
+  pullPolicy: Always
+
+replicaCount: 1
+deploymentName: mailserver-mock
+
+service:
+  name: mailserver-mock-svc
+  type: ClusterIP
+  smtp:
+    port: 1025
+    targetPort: 1025
+  imap:
+    port: 1143
+    targetPort: 1143
+
+pvc:
+  enabled: true
+  name: mailserver-mock-mails-pvc
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  size: "256Mi"
+
+volume:
+  mountPath: /app/mails
+
+env:
+  mailDir: /app/mails
+  usersFile: /app/users.json
+
+ingress:
+  hosts:
+    - mailmock.gmk.lan
+
+istio:
+  gatewayName: mailserver-mock-gw
+  smtpPort: 1025
+  imapPort: 1143

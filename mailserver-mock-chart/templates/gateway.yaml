@@ -1,0 +1,22 @@
+{{- if .Capabilities.APIVersions.Has "networking.istio.io/v1beta1" }}
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: {{ .Values.istio.gatewayName }}
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: {{ .Values.istio.smtpPort }}
+        name: smtp
+        protocol: TCP
+      hosts:
+        - "*"
+    - port:
+        number: {{ .Values.istio.imapPort }}
+        name: imap
+        protocol: TCP
+      hosts:
+        - "*"
+{{- end }}

@@ -1,0 +1,26 @@
+{{- if .Capabilities.APIVersions.Has "networking.istio.io/v1beta1" }}
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: {{ .Values.deploymentName }}-vs
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - {{ .Values.istio.gatewayName }}
+  tcp:
+    - match:
+        - port: {{ .Values.istio.smtpPort }}
+      route:
+        - destination:
+            host: {{ .Values.service.name }}
+            port:
+              number: {{ .Values.service.smtp.port }}
+    - match:
+        - port: {{ .Values.istio.imapPort }}
+      route:
+        - destination:
+            host: {{ .Values.service.name }}
+            port:
+              number: {{ .Values.service.imap.port }}
+{{- end }}

@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.deploymentName }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.deploymentName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.deploymentName }}
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+        - name: {{ .Values.deploymentName }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: SMTP_HOST
+              value: "0.0.0.0"
+            - name: SMTP_PORT
+              value: {{ .Values.service.smtp.targetPort | quote }}
+            - name: IMAP_HOST
+              value: "0.0.0.0"
+            - name: IMAP_PORT
+              value: {{ .Values.service.imap.targetPort | quote }}
+            - name: MAIL_DIR
+              value: {{ .Values.env.mailDir | quote }}
+            - name: USERS_FILE
+              value: {{ .Values.env.usersFile | quote }}
+          ports:
+            - name: smtp
+              containerPort: {{ .Values.service.smtp.targetPort }}
+            - name: imap
+              containerPort: {{ .Values.service.imap.targetPort }}
+          startupProbe:
+            tcpSocket:
+              port: {{ .Values.service.smtp.targetPort }}
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            failureThreshold: 10
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.service.smtp.targetPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.service.imap.targetPort }}
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: mails
+              mountPath: {{ .Values.volume.mountPath }}
+      volumes:
+        - name: mails
+          {{- if .Values.pvc.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.pvc.name }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
