@@ -212,9 +212,10 @@ def _mail_dir_ok():
 
 
 class HTTPHandler(BaseHTTPRequestHandler):
-    server_version = "mailserver-mock"
-    sys_version = ""
     protocol_version = "HTTP/1.1"
+
+    def version_string(self):
+        return "mailserver-mock"
 
     # --- Antwort-Hilfen -----------------------------------------------------
 
