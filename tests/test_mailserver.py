@@ -700,3 +700,112 @@ class IMAPTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+###############################################################################
+# Regressionstests: DATA-Body, STORE-Sequence-Sets, Path Traversal, ENVELOPE
+###############################################################################
+
+class SMTPDataBodyTests(unittest.TestCase):
+    def test_data_preserves_blank_lines_and_whitespace(self):
+        """Regressionstest: line.strip() lief früher auch im DATA-Modus, wodurch
+        Leerzeilen, Einrückungen und Leerzeichen am Zeilenende verloren gingen."""
+        _reset_mails()
+        body = "Subject: ws\r\n\r\nPara1\r\n\r\n    indented\r\ntrailing   \r\n\r\nend"
+        _smtp_send_mail("<a@b>", "<c@d>", body)
+        self.assertEqual(storage.load_mail(1), body + "\r\n")
+
+    def test_missing_header_separator_is_inserted(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "Subject: x\r\nX-Folded: a\r\n b\r\nbody line\r\n\r\n  more")
+        self.assertEqual(
+            storage.load_mail(1), "Subject: x\r\nX-Folded: a\r\n b\r\n\r\nbody line\r\n\r\n  more\r\n"
+        )
+
+
+class IMAPStoreSeqSetTests(unittest.TestCase):
+    def test_store_sequence_set_with_imaplib(self):
+        """Regressionstest: STORE 1:1 legte früher eine Datei 1:1.flags an und
+        antwortete mit "* 1:1 FETCH", woran imaplib abbrach."""
+        import imaplib
+
+        _reset_mails()
+        for i in range(3):
+            _smtp_send_mail("<a@b>", "<c@d>", f"body {i}")
+        client = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+        try:
+            client.login("testuser", "testpass")
+            client.select("INBOX")
+            typ, data = client.store("1:1", "+FLAGS", r"(\Seen)")
+            self.assertEqual(typ, "OK")
+            self.assertEqual(len(data), 1)
+            self.assertTrue(data[0].startswith(b"1 (FLAGS"))
+
+            typ, data = client.store("2:*", "+FLAGS", r"(\Flagged)")
+            self.assertEqual(typ, "OK")
+            self.assertEqual(len(data), 2)
+        finally:
+            client.logout()
+
+        self.assertEqual(storage.load_flags(1), [r"\Seen"])
+        self.assertEqual(storage.load_flags(2), [r"\Flagged"])
+        self.assertEqual(storage.load_flags(3), [r"\Flagged"])
+        self.assertEqual(sorted(p.name for p in storage.MAIL_DIR.glob("*.flags")), ["1.flags", "2.flags", "3.flags"])
+
+    def test_store_rejects_path_traversal(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "body")
+        evil = storage.MAIL_DIR.parent.parent / "evil.flags"
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            _imap_select(r, w, "A2")
+            for i, seq in enumerate(["../../evil", "1:1/../x", "0", "-1", "abc"]):
+                _write(w, f"B{i} STORE {seq} FLAGS x")
+                self.assertTrue(_read(r).startswith(f"B{i} BAD"), seq)
+            _write(w, "B9 UID STORE ../../evil FLAGS x")
+            self.assertTrue(_read(r).startswith("B9 BAD"))
+        finally:
+            sock.close()
+        self.assertFalse(evil.exists())
+        self.assertEqual([p.name for p in storage.MAIL_DIR.glob("*.flags")], ["1.flags"])
+
+    def test_storage_rejects_non_integer_ids(self):
+        for bad in ("1:1", "../../evil", 0, -1, True):
+            with self.assertRaises(ValueError):
+                storage.load_flags(bad)
+
+
+class EnvelopeEscapingTests(unittest.TestCase):
+    def test_quotes_and_backslashes_are_escaped(self):
+        raw = 'From: "Bob \\"B\\" Smith" <bob@example.com>\r\nSubject: He said "hi" \\o/\r\nDate: x\r\n\r\nbody'
+        env = storage.get_envelope(raw)
+        self.assertIn(r'"He said \"hi\" \\o/"', env)
+        self.assertIn(r'(("Bob \"B\" Smith" NIL "bob" "example.com"))', env)
+
+    def test_non_ascii_subject_is_sent_as_literal(self):
+        env = storage.get_envelope("Subject: Grüße\r\nDate: x\r\n\r\nbody")
+        self.assertIn('"x" {7}\r\nGrüße ', env)
+
+    def test_folded_subject_is_unfolded(self):
+        env = storage.get_envelope("Subject: line one\r\n line two\r\nDate: x\r\n\r\nbody")
+        self.assertIn('"line one line two"', env)
+
+    def test_fetch_envelope_parses_with_imaplib(self):
+        import imaplib
+
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", 'From: "Ä \\"Q\\"" <a@b.de>\r\nSubject: He said "hi" – Grüße\r\n\r\nbody')
+        client = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+        try:
+            client.login("testuser", "testpass")
+            client.select("INBOX")
+            typ, data = client.fetch("1", "(BODY.PEEK[])")
+            self.assertEqual(typ, "OK")
+            # Envelope-Literals für Betreff und Anzeigename, dann BODY[]-Literal.
+            literals = [part[1] for part in data if isinstance(part, tuple)]
+            self.assertIn('Ä "Q"'.encode(), literals)
+            self.assertIn('He said "hi" – Grüße'.encode(), literals)
+            self.assertTrue(literals[-1].endswith(b"body\r\n"))
+        finally:
+            client.logout()

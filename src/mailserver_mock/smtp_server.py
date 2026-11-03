@@ -80,13 +80,16 @@ class SMTPHandler(socketserver.StreamRequestHandler):
             line = self._read()
             if line is None:
                 return
-            cmd = line.strip()
-            if cmd == "":
-                continue
-            upper = cmd.upper()
-
             if data_mode:
-                if cmd == ".":
+                # Im DATA-Modus die Rohzeile verarbeiten: nur das Zeilenende abschneiden,
+                # Leerzeilen, Einrückungen und Leerzeichen am Zeilenende bleiben erhalten.
+                if line.endswith("\r\n"):
+                    data_line = line[:-2]
+                elif line.endswith("\n"):
+                    data_line = line[:-1]
+                else:
+                    data_line = line
+                if data_line == ".":
                     if quota_error:
                         self._write(_format_error(quota_error, "552", "5.2.2", "Mailbox full, quota exceeded"))
                     else:
@@ -107,9 +110,14 @@ class SMTPHandler(socketserver.StreamRequestHandler):
                     rcpt_to = []
                 else:
                     # RFC 5321 Dot-Stuffing: hebt das führende-Punkt-Escaping des Clients wieder auf.
-                    stripped = cmd[1:] if cmd.startswith(".") else cmd
-                    data_lines.append(stripped + "\n")
+                    unstuffed = data_line[1:] if data_line.startswith(".") else data_line
+                    data_lines.append(unstuffed + "\r\n")
                 continue
+
+            cmd = line.strip()
+            if cmd == "":
+                continue
+            upper = cmd.upper()
 
             if upper.startswith("EHLO"):
                 self._write("250-localhost greets you")

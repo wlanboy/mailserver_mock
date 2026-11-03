@@ -30,6 +30,10 @@ def _parse_seq_id(s, max_id):
         return 0
 
 
+_SEQ_NUM = r"(?:[1-9][0-9]*|\*)"
+_SEQ_SET_RE = re.compile(rf"^{_SEQ_NUM}(?::{_SEQ_NUM})?(?:,{_SEQ_NUM}(?::{_SEQ_NUM})?)*$")
+
+
 def _parse_seq_set(seq_set, max_id):
     """Parst IMAP-Sequence-Sets: "1", "1:*", "2:4", "1,3,5:7"."""
     ids = []
@@ -329,32 +333,36 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         if len(parts) < 3:
             self._write(f"{tag} BAD STORE syntax")
             return
-        msg_num = parts[0]
+        seq_set = parts[0]
         action = parts[1].upper()
         flags_str = " ".join(parts[2:]).strip("()")
         new_flags = flags_str.split()
 
-        current = storage.load_flags(msg_num)
-
-        if action == "FLAGS":
-            current = new_flags
-        elif action in ("+FLAGS", "+FLAGS.SILENT"):
-            for f in new_flags:
-                if f not in current:
-                    current.append(f)
-        elif action in ("-FLAGS", "-FLAGS.SILENT"):
-            current = [f for f in current if f not in new_flags]
-        else:
+        if not _SEQ_SET_RE.match(seq_set):
+            self._write(f"{tag} BAD STORE invalid sequence set")
+            return
+        if action not in ("FLAGS", "FLAGS.SILENT", "+FLAGS", "+FLAGS.SILENT", "-FLAGS", "-FLAGS.SILENT"):
             self._write(f"{tag} BAD STORE action")
             return
 
-        storage.save_flags(msg_num, current)
-
-        if ".SILENT" not in action:
-            if is_uid:
-                self._write(f"* {msg_num} FETCH (FLAGS ({' '.join(current)}) UID {msg_num})")
+        for msg_id in _parse_seq_set(seq_set, storage.count_mails()):
+            current = storage.load_flags(msg_id)
+            if action.startswith("+"):
+                for f in new_flags:
+                    if f not in current:
+                        current.append(f)
+            elif action.startswith("-"):
+                current = [f for f in current if f not in new_flags]
             else:
-                self._write(f"* {msg_num} FETCH (FLAGS ({' '.join(current)}))")
+                current = list(new_flags)
+
+            storage.save_flags(msg_id, current)
+
+            if ".SILENT" not in action:
+                if is_uid:
+                    self._write(f"* {msg_id} FETCH (FLAGS ({' '.join(current)}) UID {msg_id})")
+                else:
+                    self._write(f"* {msg_id} FETCH (FLAGS ({' '.join(current)}))")
         self._write(f"{tag} OK STORE completed")
 
     def _handle_search(self, tag, args=""):
