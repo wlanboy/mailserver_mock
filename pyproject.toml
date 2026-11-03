@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "wlanboy", email = "wlanboy@githumb.com" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.14"
 dependencies = []
 
 [project.scripts]
@@ -19,5 +19,5 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pyright>=1.1.414",
-    "pytest>=8.4.2",
+    "pytest>=9.2.0",
 ]
