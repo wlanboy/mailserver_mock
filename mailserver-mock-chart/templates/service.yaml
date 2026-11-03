@@ -13,3 +13,6 @@ spec:
     - name: imap
       port: {{ .Values.service.imap.port }}
       targetPort: {{ .Values.service.imap.targetPort }}
+    - name: http
+      port: {{ .Values.service.http.port }}
+      targetPort: {{ .Values.service.http.targetPort }}

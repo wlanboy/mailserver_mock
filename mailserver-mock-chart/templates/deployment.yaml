@@ -38,6 +38,10 @@ spec:
               value: "0.0.0.0"
             - name: IMAP_PORT
               value: {{ .Values.service.imap.targetPort | quote }}
+            - name: HTTP_HOST
+              value: "0.0.0.0"
+            - name: HTTP_PORT
+              value: {{ .Values.service.http.targetPort | quote }}
             - name: MAIL_DIR
               value: {{ .Values.env.mailDir | quote }}
             - name: USERS_FILE
@@ -51,22 +55,27 @@ spec:
               containerPort: {{ .Values.service.smtp.targetPort }}
             - name: imap
               containerPort: {{ .Values.service.imap.targetPort }}
+            - name: http
+              containerPort: {{ .Values.service.http.targetPort }}
           startupProbe:
-            tcpSocket:
-              port: {{ .Values.service.smtp.targetPort }}
+            httpGet:
+              path: /health
+              port: http
             initialDelaySeconds: 2
             periodSeconds: 3
             failureThreshold: 10
           livenessProbe:
-            tcpSocket:
-              port: {{ .Values.service.smtp.targetPort }}
+            httpGet:
+              path: /health
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
           readinessProbe:
-            tcpSocket:
-              port: {{ .Values.service.imap.targetPort }}
+            httpGet:
+              path: /health
+              port: http
             initialDelaySeconds: 2
             periodSeconds: 10
             timeoutSeconds: 2

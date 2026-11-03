@@ -11,11 +11,12 @@ Minimaler SMTP- und IMAP-Mock-Server für lokale Tests, in reinem Python
 |-----------|-------------------|
 | SMTP      | 127.0.0.1:1025    |
 | IMAP      | 127.0.0.1:1143    |
+| HTTP (API + Web-UI) | 127.0.0.1:8025 |
 
 Standard-Zugangsdaten: `testuser` / `testpass`
 
 Alle Werte lassen sich per Umgebungsvariable überschreiben:
-`SMTP_HOST`, `SMTP_PORT`, `IMAP_HOST`, `IMAP_PORT`, `MAIL_USER`, `MAIL_PASS`, `MAIL_DIR`, `USERS_FILE`.
+`SMTP_HOST`, `SMTP_PORT`, `IMAP_HOST`, `IMAP_PORT`, `HTTP_HOST`, `HTTP_PORT`, `MAIL_USER`, `MAIL_PASS`, `MAIL_DIR`, `USERS_FILE`.
 
 ## Test-User & simulierte Fehlerszenarien (`users.json`)
 
@@ -56,6 +57,9 @@ Session.
 inkl. `.SILENT`), `SEARCH`, `IDLE`, `LOGOUT`. `FETCH`/`UID FETCH` setzen
 `\Seen` implizit, außer bei `BODY.PEEK[...]` (RFC 3501 §6.4.5).
 
+**HTTP:** kleine JSON-API und Web-UI nach dem Vorbild von MailHog/Mailpit,
+siehe [HTTP-API & Web-UI](#http-api--web-ui).
+
 Ausführliche Beschreibung der jeweiligen RFC-Implementierung inkl. bewusst
 ausgelassener Teile: [`src/smtp.md`](src/smtp.md), [`src/imap.md`](src/imap.md).
 
@@ -76,7 +80,42 @@ python3.9 -m venv .venv
 .venv/bin/mailserver-mock
 ```
 
-Der Server läuft im Vordergrund und beendet SMTP + IMAP gemeinsam bei `Ctrl+C`.
+Der Server läuft im Vordergrund und beendet SMTP, IMAP und HTTP gemeinsam bei `Ctrl+C`.
+
+## HTTP-API & Web-UI
+
+Unter <http://127.0.0.1:8025/> läuft eine Weboberfläche (statisches HTML/CSS/JS, kein Framework),
+die eingegangene Mails live anzeigt: Liste mit Suche, Detailansicht mit HTML-, Text-, Header- und
+Quelltext-Tab, Download als `.eml`, Löschen einzelner oder aller Mails. HTML-Mails werden in einem
+`<iframe sandbox>` ohne Skripte und ohne externe Ressourcen gerendert. Tastatur: `j`/`k` bzw.
+Pfeiltasten zum Blättern, `/` Suche, `r` neu laden, `Entf` löschen, `Esc` schließen.
+
+Dieselben Daten liefert die JSON-API, damit Integrationstests prüfen können, ob eine Mail
+angekommen ist, ohne IMAP zu sprechen:
+
+| Methode  | Pfad               | Beschreibung |
+|----------|--------------------|--------------|
+| `GET`    | `/health`          | `200` mit Status von SMTP, IMAP und Mail-Verzeichnis, `503` wenn etwas davon nicht läuft |
+| `GET`    | `/mails`           | Alle Mails, neueste zuerst. Optionale Filter (Teilstring, Groß-/Kleinschreibung egal): `?to=`, `?from=`, `?subject=` |
+| `GET`    | `/mails/{id}`      | Eine Mail mit Headern, `text`, `html` und Anhangsliste |
+| `GET`    | `/mails/{id}/raw`  | Rohe Nachricht als `message/rfc822` |
+| `DELETE` | `/mails`           | Alle Mails löschen (Reset zwischen Tests), Antwort `{"deleted": n}` |
+| `DELETE` | `/mails/{id}`      | Eine Mail löschen, `204` bzw. `404` |
+
+`{id}` entspricht der IMAP-UID bzw. dem Dateinamen `<id>.eml`. Die API setzt keine IMAP-Flags;
+`seen`/`flags` zeigen den aktuellen Stand aus IMAP.
+
+```bash
+curl -s localhost:8025/health
+# {"status": "ok", "checks": {"smtp": "up", "imap": "up", "mail_dir": "up"}, "mails": 1}
+
+curl -s 'localhost:8025/mails?to=me@test.com' | jq '.mails[0] | {id, subject, from, to}'
+curl -s localhost:8025/mails/1 | jq -r .text
+curl -s -X DELETE localhost:8025/mails
+```
+
+Ein Integrationstest kann so z. B. vor jedem Testfall `DELETE /mails` aufrufen und danach
+`GET /mails?to=<empfänger>` pollen, bis `count` größer 0 ist.
 
 ## Tests
 
@@ -263,6 +302,13 @@ kubectl run mailtest --rm -it --restart=Never -n mailmock --image=debian:stable-
     swaks --to me@test.com --from you@test.com \
       --server mailserver-mock-svc.mailmock.svc.cluster.local --port 1025 \
       --auth-user testuser --auth-password testpass --body 'This is the email body'"
+```
+
+HTTP-API und Web-UI laufen über das Gateway auf Port 80 unter `mailmock.gmk.lan`:
+
+```bash
+curl -s http://mailmock.gmk.lan/health
+curl -s http://mailmock.gmk.lan/mails | jq '.mails[] | {id, subject}'
 ```
 
 Erwartetes Ergebnis in beiden Fällen: SMTP meldet `235` bei Login und `250` nach `DATA`, die IMAP-Session

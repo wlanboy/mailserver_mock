@@ -15,6 +15,9 @@ service:
   imap:
     port: 1143
     targetPort: 1143
+  http:
+    port: 8025
+    targetPort: 8025
 
 pvc:
   enabled: true
@@ -115,3 +118,7 @@ istio:
   gatewayName: mailserver-mock-gw
   smtpPort: 1025
   imapPort: 1143
+  # Web-UI + HTTP-API über das Ingress-Gateway (HTTP, Host-basiert auf ingress.hosts)
+  http:
+    enabled: true
+    port: 80

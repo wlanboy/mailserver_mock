@@ -1,0 +1,17 @@
+{{- if and .Values.istio.http.enabled (.Capabilities.APIVersions.Has "networking.istio.io/v1beta1") }}
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: {{ .Values.deploymentName }}-http-vs
+spec:
+  hosts:
+    {{- toYaml .Values.ingress.hosts | nindent 4 }}
+  gateways:
+    - {{ .Values.istio.gatewayName }}
+  http:
+    - route:
+        - destination:
+            host: {{ .Values.service.name }}
+            port:
+              number: {{ .Values.service.http.port }}
+{{- end }}
