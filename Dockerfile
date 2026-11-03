@@ -12,7 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd -r appuser && useradd -r -g appuser -u 1000 appuser
+RUN groupadd -r -g 1000 appuser && useradd -r -g appuser -u 1000 appuser
 
 COPY --chown=appuser:appuser main.py users.json /app/
 COPY --chown=appuser:appuser src/ /app/src/

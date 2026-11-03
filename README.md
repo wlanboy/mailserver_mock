@@ -201,6 +201,9 @@ helm status mailserver-mock -n mailmock
 kubectl get pods,svc,gateway,virtualservice -n mailmock
 ```
 
+Im Cluster kommt `users.json` aus einer ConfigMap (Default-Inhalt in `values.yaml`). Fehlerszenarien
+lassen sich so ohne Rebuild ändern: `helm upgrade ... --set-file users.json=users.json`.
+
 ### Chart aktualisieren
 
 ```bash

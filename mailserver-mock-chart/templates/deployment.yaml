@@ -13,10 +13,22 @@ spec:
         app: {{ .Values.deploymentName }}
         sidecar.istio.io/inject: "true"
     spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ .Values.deploymentName }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: SMTP_HOST
               value: "0.0.0.0"
@@ -29,7 +41,11 @@ spec:
             - name: MAIL_DIR
               value: {{ .Values.env.mailDir | quote }}
             - name: USERS_FILE
+              {{- if .Values.users.configMap.enabled }}
+              value: {{ printf "%s/users.json" (trimSuffix "/" .Values.users.mountPath) | quote }}
+              {{- else }}
               value: {{ .Values.env.usersFile | quote }}
+              {{- end }}
           ports:
             - name: smtp
               containerPort: {{ .Values.service.smtp.targetPort }}
@@ -58,7 +74,23 @@ spec:
           volumeMounts:
             - name: mails
               mountPath: {{ .Values.volume.mountPath }}
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.users.configMap.enabled }}
+            # Kein subPath, sonst würden ConfigMap-Updates nicht in den Pod propagiert
+            - name: users
+              mountPath: {{ .Values.users.mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+        {{- if .Values.users.configMap.enabled }}
+        - name: users
+          configMap:
+            name: {{ .Values.users.configMap.name }}
+        {{- end }}
         - name: mails
           {{- if .Values.pvc.enabled }}
           persistentVolumeClaim:

@@ -29,7 +29,83 @@ volume:
 
 env:
   mailDir: /app/mails
+  # Nur relevant bei users.configMap.enabled=false (dann die ins Image gebackene Datei)
   usersFile: /app/users.json
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+# Pod-Ebene: fsGroup sorgt dafür, dass UID 1000 auf das PVC schreiben darf.
+# runAsNonRoot steht bewusst auf Container-Ebene, damit istio-init (läuft als root) nicht blockiert wird.
+podSecurityContext:
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# users.json als ConfigMap. Die Datei wird bei jedem Login neu gelesen, Änderungen greifen
+# nach helm upgrade ohne Rebuild/Restart (Kubelet-Sync, i. d. R. < 1 Minute).
+users:
+  configMap:
+    enabled: true
+    name: mailserver-mock-users
+  mountPath: /app/config
+  # Optional: Roh-JSON, hat Vorrang vor users.config, z. B.
+  #   helm upgrade ... --set-file users.json=users.json
+  json: ""
+  # Default-Inhalt, entspricht users.json im Repo-Root
+  config:
+    users:
+      - username: testuser
+        password: testpass
+        behavior: normal
+      - username: testuser_421
+        password: testpass_421
+        behavior: too_many
+        delay_seconds: 1
+        smtp:
+          code: "421"
+          enhanced_code: "4.7.0"
+          message: Too many errors, closing transmission channel
+        imap:
+          response_code: LIMIT
+          message: Too many simultaneous connections
+      - username: testuser_451
+        password: testpass_451
+        behavior: timeout
+        delay_seconds: 60
+        smtp:
+          code: "451"
+          enhanced_code: "4.4.2"
+          message: Timeout waiting for response, closing connection
+        imap:
+          response_code: UNAVAILABLE
+          message: Temporary failure, please try again later
+      - username: testuser_552
+        password: testpass_552
+        behavior: quota
+        smtp:
+          code: "552"
+          enhanced_code: "5.2.2"
+          message: Mailbox full, quota exceeded
+        imap:
+          response_code: OVERQUOTA
+          message: Quota exceeded
 
 ingress:
   hosts:
