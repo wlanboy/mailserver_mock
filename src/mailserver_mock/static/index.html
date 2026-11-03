@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mailserver Mock</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A2.5 2.5 0 0 1 5.5 4h13A2.5 2.5 0 0 1 21 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5v-11Zm2.2-.4 6.8 5.3 6.8-5.3a.9.9 0 0 0-.3 0h-13a.9.9 0 0 0-.3 0Z"/></svg>
+      <span>Mailserver&nbsp;Mock</span>
+      <span class="count" id="mail-count" title="Mails im Postfach">0</span>
+    </div>
+
+    <div class="health" id="health" aria-live="polite">
+      <span class="dot" data-check="smtp">SMTP</span>
+      <span class="dot" data-check="imap">IMAP</span>
+      <span class="dot" data-check="mail_dir">Storage</span>
+    </div>
+
+    <div class="actions">
+      <label class="toggle" title="Alle 3 Sekunden neu laden">
+        <input type="checkbox" id="auto-refresh" checked>
+        <span>Live</span>
+      </label>
+      <button type="button" class="btn" id="refresh" title="Neu laden (r)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>
+        <span>Neu laden</span>
+      </button>
+      <button type="button" class="btn btn-danger" id="delete-all" title="Alle Mails löschen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>
+        <span>Alle löschen</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input type="search" id="search" placeholder="Suchen: Betreff, Absender, Empfänger …" autocomplete="off" aria-label="Mails durchsuchen">
+      </div>
+      <ul class="mail-list" id="mail-list" aria-label="Mails"></ul>
+      <div class="empty" id="list-empty" hidden>
+        <p class="empty-title">Noch keine Mails</p>
+        <p>Sende eine Mail per SMTP (Standard-Port <code>1025</code>), sie erscheint hier automatisch.</p>
+      </div>
+    </aside>
+
+    <section class="detail" id="detail" aria-live="polite">
+      <div class="placeholder" id="detail-placeholder">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7l9 6 9-6M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"/></svg>
+        <p>Wähle links eine Mail aus.</p>
+      </div>
+
+      <article class="mail" id="mail-view" hidden>
+        <div class="mail-head">
+          <button type="button" class="btn btn-ghost back" id="back" aria-label="Zurück zur Liste">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <h1 class="mail-subject" id="mv-subject"></h1>
+          <div class="mail-tools">
+            <a class="btn btn-ghost" id="mv-download" download title="Als .eml herunterladen">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/></svg>
+              <span>.eml</span>
+            </a>
+            <button type="button" class="btn btn-ghost btn-danger" id="mv-delete" title="Mail löschen">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <dl class="meta">
+          <dt>Von</dt><dd id="mv-from"></dd>
+          <dt>An</dt><dd id="mv-to"></dd>
+          <dt class="cc-row">Cc</dt><dd class="cc-row" id="mv-cc"></dd>
+          <dt>Datum</dt><dd id="mv-date"></dd>
+          <dt>ID</dt><dd><span id="mv-id"></span> · <span id="mv-size"></span> · <span id="mv-flags"></span></dd>
+        </dl>
+
+        <div class="attachments" id="mv-attachments" hidden></div>
+
+        <nav class="tabs" role="tablist">
+          <button type="button" role="tab" data-tab="html">HTML</button>
+          <button type="button" role="tab" data-tab="text">Text</button>
+          <button type="button" role="tab" data-tab="headers">Header</button>
+          <button type="button" role="tab" data-tab="raw">Quelltext</button>
+        </nav>
+
+        <div class="panes">
+          <div class="pane" data-pane="html">
+            <iframe id="mv-html" sandbox="" referrerpolicy="no-referrer" title="HTML-Ansicht"></iframe>
+          </div>
+          <pre class="pane" data-pane="text" id="mv-text"></pre>
+          <div class="pane" data-pane="headers">
+            <table class="headers"><tbody id="mv-headers"></tbody></table>
+          </div>
+          <pre class="pane" data-pane="raw" id="mv-raw"></pre>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>
