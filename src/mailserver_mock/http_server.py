@@ -220,7 +220,8 @@ class HTTPHandler(BaseHTTPRequestHandler):
 
     def _send(self, status, body=b"", content_type="application/json", extra_headers=None):
         self.send_response(status)
-        self.send_header("Content-Type", content_type)
+        if status != HTTPStatus.NO_CONTENT:
+            self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
