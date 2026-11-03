@@ -132,6 +132,38 @@ def load_mail(msg_id):
         return f.read()
 
 
+def mail_path(msg_id):
+    """Pfad der ``.eml``-Datei, z. B. für Größe und Empfangszeitpunkt (mtime)."""
+    return _eml_path(msg_id)
+
+
+def delete_mail(msg_id):
+    """Löscht eine Mail samt Flags. Liefert False, wenn sie nicht existierte."""
+    with _lock:
+        eml = _eml_path(msg_id)
+        if not eml.exists():
+            return False
+        eml.unlink(missing_ok=True)
+        _flags_path(msg_id).unlink(missing_ok=True)
+        return True
+
+
+def delete_all():
+    """Löscht alle Mails (Reset für Integrationstests), liefert die Anzahl.
+
+    Läuft unter demselben Lock wie save_mail, damit eine parallel eingehende
+    Mail entweder vollständig vor oder vollständig nach dem Reset landet.
+    """
+    with _lock:
+        ids = list_ids()
+        for msg_id in ids:
+            _eml_path(msg_id).unlink(missing_ok=True)
+            _flags_path(msg_id).unlink(missing_ok=True)
+        for orphan in MAIL_DIR.glob("*.flags"):
+            orphan.unlink(missing_ok=True)
+        return len(ids)
+
+
 def _imap_string(value):
     """Kodiert einen Wert als IMAP-String (RFC 3501 §4.3).
 
