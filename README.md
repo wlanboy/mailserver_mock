@@ -75,7 +75,7 @@ uv run mailserver-mock
 Ohne uv, mit venv:
 
 ```bash
-python3.9 -m venv .venv
+python3.14 -m venv .venv
 .venv/bin/pip install -e .
 .venv/bin/mailserver-mock
 ```
