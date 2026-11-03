@@ -15,7 +15,7 @@ echo "==> Push Image nach $IMAGE ..."
 docker push "$IMAGE"
 
 echo "==> Helm-Upgrade mailserver-mock ..."
-helm upgrade mailserver-mock ./mailserver-mock-chart -n mailmock
+helm upgrade --install mailserver-mock ./mailserver-mock-chart -n mailmock
 
 echo "==> Rollout-Restart mailserver-mock ..."
 kubectl rollout restart deployment/mailserver-mock -n mailmock
