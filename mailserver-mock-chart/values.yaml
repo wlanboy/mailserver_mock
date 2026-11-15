@@ -3,7 +3,6 @@ image:
   tag: latest
   pullPolicy: Always
 
-replicaCount: 1
 deploymentName: mailserver-mock
 
 service:

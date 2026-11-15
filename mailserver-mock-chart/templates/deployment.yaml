@@ -3,7 +3,11 @@ kind: Deployment
 metadata:
   name: {{ .Values.deploymentName }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  # Genau ein Pod: RWO-PVC, und die ID-Vergabe in storage.py ist nur prozessintern gesperrt.
+  # Recreate beendet den alten Pod vor dem Start des neuen (sonst Multi-Attach-Fehler).
+  replicas: 1
+  strategy:
+    type: Recreate
   revisionHistoryLimit: 2
   selector:
     matchLabels:
