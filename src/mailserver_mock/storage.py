@@ -10,6 +10,7 @@ import os
 import re
 import threading
 from email import message_from_string
+from email.parser import HeaderParser
 from email.utils import formatdate, getaddresses
 from pathlib import Path
 
@@ -38,21 +39,31 @@ def _flags_path(msg_id):
     return MAIL_DIR / f"{_checked_id(msg_id)}.flags"
 
 
-def _ensure_header_separator(raw):
-    """Fügt eine Leerzeile vor dem Body ein, falls der Client nach dem letzten
-    Header keine gesendet hat. Der Body selbst bleibt unverändert."""
+def _is_header_field(line):
+    """Prüft auf "Name: Wert" mit einem Feldnamen nach RFC 5322 §3.6.8
+    (druckbares ASCII ohne Leerzeichen und ohne Doppelpunkt)."""
+    name, sep, _ = line.partition(":")
+    return bool(sep) and bool(name) and all(33 <= ord(c) <= 126 for c in name)
+
+
+def _split_headers(raw):
+    """Teilt eine Nachricht in Header-Zeilen und Body-Zeilen.
+
+    Der Header-Block endet an der ersten Leerzeile oder an der ersten Zeile,
+    die weder Header-Feld noch Fortsetzungszeile ist (Client hat die Leerzeile
+    vergessen). Der Body ist ``None``, wenn die Nachricht nur aus Headern
+    besteht. Fehlt der Header-Block ganz, ist die Header-Liste leer.
+    """
     lines = raw.replace("\r\n", "\n").split("\n")
     for idx, line in enumerate(lines):
         if line.strip() == "":
-            break  # reguläres Header-Ende
-        if line[0] in " \t":
+            return lines[:idx], lines[idx + 1 :]
+        if idx > 0 and line[0] in " \t":
             continue  # gefaltete Header-Zeile (RFC 5322 §2.2.3)
-        name, sep, _ = line.partition(":")
-        if sep and name and not any(c.isspace() for c in name):
-            continue  # Header-Feld "Name: Wert"
-        lines.insert(idx, "")
-        break
-    return "\n".join(lines)
+        if _is_header_field(line):
+            continue
+        return lines[:idx], lines[idx:]
+    return lines, None
 
 
 def list_ids():
@@ -82,16 +93,13 @@ def count_mails():
 
 
 def save_mail(from_addr, to_addrs, raw):
-    """Speichert einen rohen DATA-Payload und generiert Header, falls keine gesendet wurden."""
-    if "SUBJECT:" not in raw.upper():
-        header_template = (
-            "From: {from_addr}\r\n"
-            "To: {to_addrs}\r\n"
-            "Subject: Mock Mail {msg_id}\r\n"
-            f"Date: {formatdate(localtime=False)}\r\n\r\n"
-        )
-    else:
-        header_template = None
+    """Speichert einen rohen DATA-Payload und ergänzt fehlende Header.
+
+    Fehlen From, To, Subject oder Date im Header-Block, werden sie einzeln
+    vorangestellt. Vorhandene Header bleiben unverändert, der Body ebenso.
+    """
+    header_lines, body_lines = _split_headers(raw)
+    present = HeaderParser().parsestr("\n".join(header_lines) + "\n\n")
 
     # next_id() (Verzeichnis-Scan) und das Anlegen der Datei müssen atomar
     # zusammen ablaufen, sonst können zwei parallele Sessions (Threading-
@@ -99,13 +107,17 @@ def save_mail(from_addr, to_addrs, raw):
     with _lock:
         msg_id = next_id()
 
-        if header_template is not None:
-            header = header_template.format(from_addr=from_addr, to_addrs=", ".join(to_addrs), msg_id=msg_id)
-            content = header + raw
-        else:
-            content = _ensure_header_separator(raw)
-
-        content = content.replace("\r\n", "\n").replace("\n", "\r\n")
+        defaults = (
+            ("From", from_addr),
+            ("To", ", ".join(to_addrs)),
+            ("Subject", f"Mock Mail {msg_id}"),
+            ("Date", formatdate(localtime=False)),
+        )
+        generated = [f"{name}: {value}" for name, value in defaults if name not in present]
+        lines = generated + header_lines
+        if body_lines is not None:
+            lines += [""] + body_lines
+        content = "\r\n".join(lines)
 
         with open(_eml_path(msg_id), "w", encoding="utf-8", newline="") as f:
             f.write(content)

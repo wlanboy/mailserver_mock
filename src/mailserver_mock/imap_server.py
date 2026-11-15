@@ -47,14 +47,26 @@ def _parse_seq_set(seq_set, max_id):
             end = _parse_seq_id(range_parts[1], max_id)
             if start > end:
                 start, end = end, start
-            for i in range(start, end + 1):
-                if 0 < i <= max_id:
-                    ids.append(i)
+            ids.extend(range(max(start, 1), min(end, max_id) + 1))
         else:
             i = _parse_seq_id(part, max_id)
             if 0 < i <= max_id:
                 ids.append(i)
     return sorted(set(ids))
+
+
+def _resolve_messages(seq_set, uids, is_uid):
+    """Bildet ein Sequence-Set auf (Sequenznummer, UID)-Paare ab.
+
+    ``uids`` ist ``storage.list_ids()``: Sequenznummer n gehört zu ``uids[n-1]``.
+    Bei ``is_uid`` bezieht sich das Set auf UIDs, ``*`` ist dann die höchste UID.
+    UIDs ohne Mail (Lücken) werden übersprungen.
+    """
+    if is_uid:
+        seq_of = {uid: n for n, uid in enumerate(uids, start=1)}
+        wanted = _parse_seq_set(seq_set, uids[-1] if uids else 0)
+        return [(seq_of[uid], uid) for uid in wanted if uid in seq_of]
+    return [(n, uids[n - 1]) for n in _parse_seq_set(seq_set, len(uids))]
 
 
 _FLAG_SEARCH_KEYS = {
@@ -71,6 +83,19 @@ _TEXT_SEARCH_KEYS = {
     "CC": "Cc",
     "BCC": "Bcc",
 }
+
+
+_LITERAL_RE = re.compile(r"\{(\d+)\}$")
+_MAX_LITERAL_SIZE = 64 * 1024
+
+
+def _quote_literal(data):
+    """Wandelt Literal-Inhalt in einen IMAP-Quoted-String um.
+
+    Die Escapes (``\\`` und ``\"``) versteht ``shlex.split`` im POSIX-Modus
+    genauso wie ein IMAP-Parser, die Handler sehen danach nur noch Quoted-Strings.
+    """
+    return '"' + data.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _tokenize_search(args):
@@ -115,6 +140,34 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             return None
         return line.decode("utf-8", errors="replace")
 
+    def _read_command(self):
+        """Liest eine Kommandozeile samt synchronisierender Literale (``{n}``).
+
+        Endet die Zeile auf ``{n}``, bestätigt der Server mit ``+ Ready``, liest
+        genau n Bytes und danach den Rest der Zeile. Das Literal wird als
+        Quoted-String in die Zeile eingesetzt. Gibt ``None`` bei Verbindungsende
+        zurück und ``""``, wenn ein zu großes Literal abgelehnt wurde.
+        """
+        line = self._read()
+        if line is None:
+            return None
+        line = line.rstrip("\r\n")
+        while match := _LITERAL_RE.search(line):
+            size = int(match.group(1))
+            if size > _MAX_LITERAL_SIZE:
+                tag = line.split(" ", 1)[0]
+                self._write(f"{tag} BAD Literal too large")
+                return ""
+            self._write("+ Ready for literal data")
+            self.wfile.flush()
+            data = self.rfile.read(size)
+            rest = self._read()
+            if len(data) < size or rest is None:
+                return None
+            literal = _quote_literal(data.decode("utf-8", errors="replace"))
+            line = line[: match.start()] + literal + rest.rstrip("\r\n")
+        return line
+
     def handle(self):
         self._write("* OK IMAP4rev1 Service Ready")
 
@@ -122,7 +175,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         self.quota_error = None
 
         while True:
-            line = self._read()
+            line = self._read_command()
             if line is None:
                 return
             line = line.strip()
@@ -141,8 +194,10 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 self._write(f"{tag} OK CAPABILITY completed")
 
             elif cmd == "LOGIN":
-                clean = args.replace('"', "")
-                a = clean.split()
+                try:
+                    a = shlex.split(args)
+                except ValueError:
+                    a = []
                 if len(a) != 2:
                     self._write(f"{tag} BAD LOGIN syntax")
                     continue
@@ -245,10 +300,10 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         mailbox = args[:paren_start].strip().strip('"') or "INBOX"
         items = args[paren_start + 1 : paren_end].split()
 
-        count = storage.count_mails()
-        unseen = sum(1 for i in range(1, count + 1) if "\\Seen" not in storage.load_flags(i))
+        uids = storage.list_ids()
+        unseen = sum(1 for uid in uids if "\\Seen" not in storage.load_flags(uid))
         values = {
-            "MESSAGES": count,
+            "MESSAGES": len(uids),
             "RECENT": 0,
             "UIDNEXT": storage.next_id(),
             "UIDVALIDITY": 1,
@@ -276,9 +331,9 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             if len(parts) < 2:
                 self._write(f"{tag} BAD UID FETCH syntax")
                 return
-            self._handle_fetch(tag, parts[1])
+            self._handle_fetch(tag, parts[1], is_uid=True)
         elif sub == "SEARCH":
-            self._handle_search(tag, parts[1] if len(parts) > 1 else "")
+            self._handle_search(tag, parts[1] if len(parts) > 1 else "", is_uid=True)
         elif sub == "STORE":
             if len(parts) < 2:
                 self._write(f"{tag} BAD UID STORE syntax")
@@ -288,17 +343,16 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             logger.warning("unhandled UID subcommand sub=%s args=%r", sub, args)
             self._write(f"{tag} BAD UID command not supported")
 
-    def _handle_fetch(self, tag, args):
+    def _handle_fetch(self, tag, args, is_uid=False):
         fields = args.split(None, 1)
         if not fields:
             self._write(f"{tag} BAD FETCH syntax")
             return
 
-        max_id = storage.count_mails()
-        ids = _parse_seq_set(fields[0], max_id)
+        messages = _resolve_messages(fields[0], storage.list_ids(), is_uid)
         mark_seen = _fetch_marks_seen(fields[1] if len(fields) > 1 else "")
 
-        for msg_id in ids:
+        for seq, msg_id in messages:
             flags = storage.load_flags(msg_id)
             if mark_seen and "\\Seen" not in flags:
                 flags.append("\\Seen")
@@ -318,7 +372,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
 
             self.wfile.write(
                 (
-                    f"* {msg_id} FETCH (UID {msg_id} FLAGS ({' '.join(flags)}) "
+                    f"* {seq} FETCH (UID {msg_id} FLAGS ({' '.join(flags)}) "
                     f"ENVELOPE {envelope} BODY[] {{{len(body)}}}\r\n"
                 ).encode("utf-8")
             )
@@ -345,7 +399,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             self._write(f"{tag} BAD STORE action")
             return
 
-        for msg_id in _parse_seq_set(seq_set, storage.count_mails()):
+        for seq, msg_id in _resolve_messages(seq_set, storage.list_ids(), is_uid):
             current = storage.load_flags(msg_id)
             if action.startswith("+"):
                 for f in new_flags:
@@ -360,12 +414,12 @@ class IMAPHandler(socketserver.StreamRequestHandler):
 
             if ".SILENT" not in action:
                 if is_uid:
-                    self._write(f"* {msg_id} FETCH (FLAGS ({' '.join(current)}) UID {msg_id})")
+                    self._write(f"* {seq} FETCH (FLAGS ({' '.join(current)}) UID {msg_id})")
                 else:
-                    self._write(f"* {msg_id} FETCH (FLAGS ({' '.join(current)}))")
+                    self._write(f"* {seq} FETCH (FLAGS ({' '.join(current)}))")
         self._write(f"{tag} OK STORE completed")
 
-    def _handle_search(self, tag, args=""):
+    def _handle_search(self, tag, args="", is_uid=False):
         """Wertet eine Teilmenge der RFC-3501-SEARCH-Kriterien aus.
 
         Unterstützt: ALL, (UN)SEEN, (UN)ANSWERED, (UN)DELETED, (UN)FLAGGED,
@@ -373,9 +427,12 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         BODY/TEXT <string> sowie nackte Sequence-Sets. Mehrere Kriterien
         werden UND-verknüpft. NOT/OR/Datumskriterien werden nicht ausgewertet
         (unbekannte Tokens filtern nicht, statt einen Fehler zu werfen).
+
+        Gefiltert wird auf (Sequenznummer, UID)-Paaren. Die Antwort enthält
+        Sequenznummern, bei ``UID SEARCH`` die UIDs.
         """
-        max_id = storage.count_mails()
-        ids = list(range(1, max_id + 1))
+        uids = storage.list_ids()
+        ids = list(enumerate(uids, start=1))
 
         tokens = _tokenize_search(args)
         i = 0
@@ -385,14 +442,14 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 i += 1
             elif key in _FLAG_SEARCH_KEYS:
                 flag = _FLAG_SEARCH_KEYS[key]
-                ids = [n for n in ids if flag in storage.load_flags(n)]
+                ids = [m for m in ids if flag in storage.load_flags(m[1])]
                 i += 1
             elif key.startswith("UN") and key[2:] in _FLAG_SEARCH_KEYS:
                 flag = _FLAG_SEARCH_KEYS[key[2:]]
-                ids = [n for n in ids if flag not in storage.load_flags(n)]
+                ids = [m for m in ids if flag not in storage.load_flags(m[1])]
                 i += 1
             elif key == "NEW":
-                ids = [n for n in ids if "\\Seen" not in storage.load_flags(n)]
+                ids = [m for m in ids if "\\Seen" not in storage.load_flags(m[1])]
                 i += 1
             elif key == "OLD":
                 i += 1  # kein \Recent-Tracking -> jede Mail gilt als "old"
@@ -400,22 +457,22 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 ids = []  # kein \Recent-Tracking -> nie ein Treffer
                 i += 1
             elif key == "UID" and i + 1 < len(tokens):
-                wanted = set(_parse_seq_set(tokens[i + 1], max_id))
-                ids = [n for n in ids if n in wanted]
+                wanted = {uid for _, uid in _resolve_messages(tokens[i + 1], uids, is_uid=True)}
+                ids = [m for m in ids if m[1] in wanted]
                 i += 2
             elif key in _TEXT_SEARCH_KEYS or key in ("BODY", "TEXT"):
                 if i + 1 >= len(tokens):
                     i += 1
                     continue
                 needle = tokens[i + 1].lower()
-                ids = [n for n in ids if _search_text_matches(n, key, needle)]
+                ids = [m for m in ids if _search_text_matches(m[1], key, needle)]
                 i += 2
             else:
-                seq = _parse_seq_set(tokens[i], max_id)
-                ids = [n for n in ids if n in set(seq)] if seq else ids
+                seq = set(_parse_seq_set(tokens[i], len(uids)))
+                ids = [m for m in ids if m[0] in seq] if seq else ids
                 i += 1
 
-        self._write("* SEARCH " + " ".join(str(n) for n in ids))
+        self._write("* SEARCH " + " ".join(str(uid if is_uid else seq) for seq, uid in ids))
         self._write(f"{tag} OK SEARCH completed")
 
 

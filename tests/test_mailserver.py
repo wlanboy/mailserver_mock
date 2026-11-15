@@ -439,6 +439,74 @@ class IMAPTests(unittest.TestCase):
         finally:
             sock.close()
 
+    _SPECIAL_USER = {"username": "spezial user", "password": 'geh eim"\\pw', "behavior": "normal"}
+
+    def _find_special_user(self, username):
+        return self._SPECIAL_USER if username == self._SPECIAL_USER["username"] else None
+
+    def test_login_quoted_with_space_quote_and_backslash(self):
+        """Quoted-Strings mit Leerzeichen und Escapes (\\" und \\\\) werden korrekt zerlegt."""
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _read(r)
+            with patch("mailserver_mock.imap_server.users.find_user", side_effect=self._find_special_user):
+                _write(w, 'A1 LOGIN "spezial user" "geh eim\\"\\\\pw"')
+                resp = _read(r)
+            self.assertEqual("A1 OK LOGIN completed", resp)
+        finally:
+            sock.close()
+
+    def test_login_with_literals(self):
+        """Synchronisierende Literale ({n}) werden mit "+ Ready" bestätigt und eingelesen."""
+        user = self._SPECIAL_USER["username"].encode("utf-8")
+        password = self._SPECIAL_USER["password"].encode("utf-8")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _read(r)
+            with patch("mailserver_mock.imap_server.users.find_user", side_effect=self._find_special_user):
+                _write(w, f"A1 LOGIN {{{len(user)}}}")
+                self.assertTrue(_read(r).startswith("+"))
+                w.write(user + f" {{{len(password)}}}\r\n".encode("utf-8"))
+                w.flush()
+                self.assertTrue(_read(r).startswith("+"))
+                w.write(password + b"\r\n")
+                w.flush()
+                resp = _read(r)
+            self.assertEqual("A1 OK LOGIN completed", resp)
+        finally:
+            sock.close()
+
+    def test_login_with_imaplib_special_password(self):
+        """imaplib quotet das Passwort (nicht den Usernamen), Leerzeichen und " müssen ankommen."""
+        import imaplib
+
+        user = {**self._SPECIAL_USER, "username": "spezial"}
+        with patch("mailserver_mock.imap_server.users.find_user", return_value=user):
+            client = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+            try:
+                typ, _ = client.login(user["username"], user["password"])
+                self.assertEqual("OK", typ)
+            finally:
+                client.logout()
+
+    def test_login_literal_too_large(self):
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _read(r)
+            _write(w, "A1 LOGIN {999999}")
+            self.assertEqual("A1 BAD Literal too large", _read(r))
+        finally:
+            sock.close()
+
+    def test_login_unbalanced_quote(self):
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _read(r)
+            _write(w, 'A1 LOGIN testuser "testpass')
+            self.assertEqual("A1 BAD LOGIN syntax", _read(r))
+        finally:
+            sock.close()
+
     def test_list(self):
         sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
         try:
@@ -713,16 +781,96 @@ class SMTPDataBodyTests(unittest.TestCase):
         """Regressionstest: line.strip() lief früher auch im DATA-Modus, wodurch
         Leerzeilen, Einrückungen und Leerzeichen am Zeilenende verloren gingen."""
         _reset_mails()
-        body = "Subject: ws\r\n\r\nPara1\r\n\r\n    indented\r\ntrailing   \r\n\r\nend"
+        body = "From: a@b\r\nTo: c@d\r\nDate: x\r\nSubject: ws\r\n\r\nPara1\r\n\r\n    indented\r\ntrailing   \r\n\r\nend"
         _smtp_send_mail("<a@b>", "<c@d>", body)
         self.assertEqual(storage.load_mail(1), body + "\r\n")
 
     def test_missing_header_separator_is_inserted(self):
         _reset_mails()
-        _smtp_send_mail("<a@b>", "<c@d>", "Subject: x\r\nX-Folded: a\r\n b\r\nbody line\r\n\r\n  more")
-        self.assertEqual(
-            storage.load_mail(1), "Subject: x\r\nX-Folded: a\r\n b\r\n\r\nbody line\r\n\r\n  more\r\n"
+        headers = "From: a@b\r\nTo: c@d\r\nDate: x\r\nSubject: x\r\nX-Folded: a\r\n b\r\n"
+        _smtp_send_mail("<a@b>", "<c@d>", headers + "body line\r\n\r\n  more")
+        self.assertEqual(storage.load_mail(1), headers + "\r\nbody line\r\n\r\n  more\r\n")
+
+
+class HeaderCompletionTests(unittest.TestCase):
+    def test_headers_without_subject_stay_in_header_block(self):
+        """Regressionstest: Fehlte nur Subject, setzte save_mail früher einen
+        kompletten zweiten Header-Block davor und schob die echten Header in
+        den Body."""
+        _reset_mails()
+        _smtp_send_mail(
+            "<a@b>", "<c@d>", "From: Alice <alice@example.com>\r\nTo: bob@example.com\r\nDate: x\r\n\r\nHallo"
         )
+        self.assertEqual(
+            storage.load_mail(1),
+            "Subject: Mock Mail 1\r\nFrom: Alice <alice@example.com>\r\nTo: bob@example.com\r\nDate: x\r\n\r\nHallo\r\n",
+        )
+
+    def test_subject_in_body_does_not_suppress_generated_headers(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "Hallo,\r\nsubject: steht nur im Text")
+        raw = storage.load_mail(1)
+        headers, _, body = raw.partition("\r\n\r\n")
+        self.assertEqual(
+            [line.split(":", 1)[0] for line in headers.split("\r\n")], ["From", "To", "Subject", "Date"]
+        )
+        self.assertIn("Subject: Mock Mail 1", headers)
+        self.assertEqual(body, "Hallo,\r\nsubject: steht nur im Text\r\n")
+
+
+class IMAPSequenceGapTests(unittest.TestCase):
+    def test_imap_after_http_delete(self):
+        """Regressionstest: Nach DELETE /mails/2 behandelte IMAP die
+        Sequenznummern 1..N als UIDs: FETCH lieferte eine leere Mail 2,
+        Mail 3 war nicht mehr erreichbar."""
+        import imaplib
+
+        _reset_mails()
+        for i in (1, 2, 3):
+            _smtp_send_mail("<a@b>", "<c@d>", f"Subject: Mail {i}\r\n\r\nbody {i}")
+        status, _, _ = _http("/mails/2", "DELETE")
+        self.assertEqual(status, 204)
+
+        client = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+        try:
+            client.login("testuser", "testpass")
+            typ, data = client.select("INBOX")
+            self.assertEqual(data, [b"2"])
+
+            typ, data = client.fetch("1:*", "(BODY.PEEK[])")
+            self.assertEqual(typ, "OK")
+            parts = [part for part in data if isinstance(part, tuple)]
+            self.assertEqual(len(parts), 2)
+            self.assertTrue(parts[0][0].startswith(b"1 (UID 1 "))
+            self.assertTrue(parts[1][0].startswith(b"2 (UID 3 "))
+            self.assertTrue(parts[0][1].endswith(b"body 1\r\n"))
+            self.assertTrue(parts[1][1].endswith(b"body 3\r\n"))
+
+            typ, data = client.uid("FETCH", "3", "(BODY.PEEK[])")
+            self.assertTrue(data[0][0].startswith(b"2 (UID 3 "))
+            typ, data = client.uid("FETCH", "2", "(BODY.PEEK[])")
+            self.assertEqual((typ, data), ("OK", [None]))
+
+            typ, data = client.store("2", "+FLAGS", r"(\Seen)")
+            self.assertEqual(data, [b"2 (FLAGS (\\Seen))"])
+            typ, data = client.uid("STORE", "1:*", "+FLAGS", r"(\Flagged)")
+            self.assertEqual(len(data), 2)
+            self.assertTrue(data[1].startswith(b"2 (FLAGS"))
+            self.assertIn(b"UID 3", data[1])
+
+            self.assertEqual(client.search(None, "ALL")[1], [b"1 2"])
+            self.assertEqual(client.uid("SEARCH", "ALL")[1], [b"1 3"])
+            self.assertEqual(client.search(None, "SEEN")[1], [b"2"])
+            self.assertEqual(client.search(None, "UID", "3")[1], [b"2"])
+            self.assertEqual(client.uid("SEARCH", "2")[1], [b"3"])
+
+            typ, data = client.status("INBOX", "(MESSAGES UNSEEN UIDNEXT)")
+            self.assertEqual(data, [b'"INBOX" (MESSAGES 2 UNSEEN 1 UIDNEXT 4)'])
+        finally:
+            client.logout()
+
+        self.assertEqual(storage.load_flags(3), [r"\Seen", r"\Flagged"])
+        self.assertEqual(sorted(p.name for p in storage.MAIL_DIR.glob("*.flags")), ["1.flags", "3.flags"])
 
 
 class IMAPStoreSeqSetTests(unittest.TestCase):

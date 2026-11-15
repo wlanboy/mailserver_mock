@@ -15,7 +15,7 @@ HTTP-API samt Web-UI über eine normale **HTTP-Route** auf Port 80 für `ingress
 
 ## Komponenten
 
-- **Deployment** (`templates/deployment.yaml`) – 1 Replica des Containers `registry.gmk.lan/mailserver`, mit Startup-, Liveness- und Readiness-Probes per `httpGet` auf `/health`. Der Endpoint liefert nur `200`, wenn SMTP- und IMAP-Listener laufen und das Mail-Verzeichnis beschreibbar ist, und ist damit aussagekräftiger als ein reiner TCP-Check. Läuft als UID/GID 1000 mit read-only Root-Filesystem, ohne Capabilities und mit `resources`-Requests/-Limits; `/tmp` ist ein kleines `emptyDir`.
+- **Deployment** (`templates/deployment.yaml`) – genau 1 Replica des Containers `registry.gmk.lan/mailserver` mit Update-Strategie `Recreate` (RWO-PVC, ID-Vergabe nur prozessintern gesperrt), mit Startup-, Liveness- und Readiness-Probes per `httpGet` auf `/health`. Der Endpoint liefert nur `200`, wenn SMTP- und IMAP-Listener laufen und das Mail-Verzeichnis beschreibbar ist, und ist damit aussagekräftiger als ein reiner TCP-Check. Läuft als UID/GID 1000 mit read-only Root-Filesystem, ohne Capabilities und mit `resources`-Requests/-Limits; `/tmp` ist ein kleines `emptyDir`.
 - **ConfigMap** (`templates/configmap-users.yaml`, nur bei `users.configMap.enabled: true`) – enthält die `users.json` mit Test-Usern und Fehlerszenarien, gemountet unter `/app/config/users.json`.
 - **PersistentVolumeClaim** (`templates/pvc.yaml`, nur bei `pvc.enabled: true`) – wird als `/app/mails`-Volume gemountet, persistiert die als `.eml` abgelegten Test-Mails über Pod-Neustarts hinweg.
 - **Service** (`templates/service.yaml`) – ClusterIP-Service mit den Ports `smtp` (1025), `imap` (1143) und `http` (8025).
@@ -33,7 +33,6 @@ Zielcluster vorhanden sind – ein `helm install`/`helm template` schlägt also 
 | Key | Beschreibung | Default |
 |---|---|---|
 | `image.repository` / `image.tag` / `image.pullPolicy` | Container-Image | `registry.gmk.lan/mailserver`, `latest`, `Always` |
-| `replicaCount` | Anzahl Replicas | `1` |
 | `deploymentName` | Name für Deployment und Ingress-Ressourcen | `mailserver-mock` |
 | `service.name` | Name des Service-Objekts | `mailserver-mock-svc` |
 | `service.type` | Service-Typ | `ClusterIP` |
