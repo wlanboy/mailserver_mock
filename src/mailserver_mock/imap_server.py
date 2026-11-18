@@ -8,10 +8,13 @@ import socketserver
 import time
 from email import message_from_string
 
-from . import imap_fetch, storage, users
+from . import connection, imap_fetch, storage, users
 
 IMAP_HOST = os.environ.get("IMAP_HOST", "127.0.0.1")
 IMAP_PORT = int(os.environ.get("IMAP_PORT", "1143"))
+# RFC 3501 §5.4: Autologout frühestens nach 30 Minuten Inaktivität. Das passt
+# auch zu IDLE, das Clients laut RFC 2177 spätestens alle 29 Minuten erneuern.
+IMAP_TIMEOUT = connection.env_timeout("IMAP_TIMEOUT", "1800")
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,7 @@ _TEXT_SEARCH_KEYS = {
 
 
 _LITERAL_RE = re.compile(r"\{(\d+)\}$")
+# Gilt für die ganze Kommandozeile samt aller Literale, nicht pro Literal.
 _MAX_LITERAL_SIZE = 64 * 1024
 
 
@@ -133,14 +137,21 @@ _CLOSE = object()
 
 
 class IMAPHandler(socketserver.StreamRequestHandler):
+    # setup() setzt damit settimeout() auf dem Client-Socket.
+    timeout = IMAP_TIMEOUT
+
     def _write(self, msg):
         self.wfile.write((msg + "\r\n").encode("utf-8"))
 
     def _read(self):
-        line = self.rfile.readline()
-        if not line:
-            return None
-        return line.decode("utf-8", errors="replace")
+        """Liest eine Zeile (höchstens connection.MAX_LINE Bytes) und meldet Überlänge mit.
+
+        Rückgabe ``(line, too_long)``; ``line`` ist ``None`` bei Verbindungsende.
+        """
+        line, too_long = connection.read_line(self.rfile)
+        if line is None:
+            return None, False
+        return line.decode("utf-8", errors="replace"), too_long
 
     def _read_command(self):
         """Liest eine Kommandozeile samt synchronisierender Literale (``{n}``).
@@ -150,27 +161,43 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         Quoted-String in die Zeile eingesetzt. Gibt ``None`` bei Verbindungsende
         zurück und ``""``, wenn ein zu großes Literal abgelehnt wurde.
         """
-        line = self._read()
+        line, too_long = self._read()
         if line is None:
             return None
+        tag = line.split(" ", 1)[0]
+        if too_long:
+            self._write(f"{tag or '*'} BAD Command line too long")
+            return ""
         line = line.rstrip("\r\n")
         while match := _LITERAL_RE.search(line):
             size = int(match.group(1))
-            if size > _MAX_LITERAL_SIZE:
-                tag = line.split(" ", 1)[0]
+            if len(line) + size > _MAX_LITERAL_SIZE:
                 self._write(f"{tag} BAD Literal too large")
                 return ""
             self._write("+ Ready for literal data")
             self.wfile.flush()
             data = self.rfile.read(size)
-            rest = self._read()
+            rest, too_long = self._read()
             if len(data) < size or rest is None:
                 return None
+            if too_long:
+                self._write(f"{tag} BAD Command line too long")
+                return ""
             literal = _quote_literal(data.decode("utf-8", errors="replace"))
             line = line[: match.start()] + literal + rest.rstrip("\r\n")
         return line
 
     def handle(self):
+        try:
+            self._session()
+        except TimeoutError:
+            logger.info("client idle for %ss, closing connection", self.timeout)
+            try:
+                self._write("* BYE Autologout; idle for too long")
+            except OSError:
+                pass
+
+    def _session(self):
         self._write("* OK IMAP4rev1 Service Ready")
 
         self.auth = False

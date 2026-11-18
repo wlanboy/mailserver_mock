@@ -21,7 +21,7 @@ from support import (
     write_line,
 )
 
-from mailserver_mock import storage
+from mailserver_mock import connection, imap_server, storage
 
 setUpModule = start_servers
 
@@ -625,3 +625,40 @@ class IMAPStoreSeqSetTests(unittest.TestCase):
         for bad in ("1:1", "../../evil", 0, -1, True):
             with self.assertRaises(ValueError):
                 storage.load_flags(bad)
+
+
+class IMAPLimitTests(unittest.TestCase):
+    """Timeout und Zeilenlimits."""
+
+    def test_overlong_command_line_is_rejected(self):
+        sock, r, w = dial((IMAP_HOST, IMAP_PORT))
+        try:
+            read_line(r)
+            write_line(w, "A1 NOOP " + "x" * (connection.MAX_LINE * 2))
+            self.assertEqual("A1 BAD Command line too long", read_line(r))
+            write_line(w, "A2 LOGIN testuser testpass")
+            self.assertEqual("A2 OK LOGIN completed", read_line(r))
+        finally:
+            sock.close()
+
+    def test_literals_count_towards_total_limit(self):
+        sock, r, w = dial((IMAP_HOST, IMAP_PORT))
+        try:
+            read_line(r)
+            write_line(w, "A1 LOGIN {40000}")
+            self.assertTrue(read_line(r).startswith("+"))
+            w.write(b"u" * 40000)
+            write_line(w, " {40000}")
+            self.assertEqual("A1 BAD Literal too large", read_line(r))
+        finally:
+            sock.close()
+
+    def test_idle_client_is_logged_out(self):
+        with patch.object(imap_server.IMAPHandler, "timeout", 0.3):
+            sock, r, w = dial((IMAP_HOST, IMAP_PORT))
+            try:
+                read_line(r)
+                self.assertEqual("* BYE Autologout; idle for too long", read_line(r))
+                self.assertEqual(b"", r.readline())
+            finally:
+                sock.close()

@@ -23,6 +23,25 @@ Danach wird zeilenweise gelesen. Es gibt keinen State für
 `mail_from`/`rcpt_to` (Transaktionszustand) und `data_mode` (ob gerade der
 DATA-Body eingelesen wird).
 
+### Timeout und Größenlimits
+
+- **Timeout.** Jede Verbindung bekommt ein Socket-Timeout von `SMTP_TIMEOUT`
+  Sekunden (Default 300, RFC 5321 §4.5.3.2). Kommt in dieser Zeit nichts vom
+  Client, antwortet der Server mit `421 4.4.2 localhost Error: timeout exceeded`
+  und schließt die Verbindung. `SMTP_TIMEOUT=0` schaltet das Timeout ab.
+- **Zeilenlänge.** Kommandozeilen sind auf 8 KiB begrenzt. Längere Zeilen verwirft der
+  Server bis zum Zeilenende und antwortet mit `500 5.5.2 Line too long`.
+- **Nachrichtengröße.** `SMTP_MAX_MESSAGE_SIZE` (Default 10 MiB) wird im `EHLO`
+  als `SIZE` angekündigt. Ein `MAIL FROM:<...> SIZE=n` über der Grenze lehnt der
+  Server sofort mit `552 5.3.4 Message size exceeds fixed maximum message size`
+  ab. Wird die Grenze erst während `DATA` überschritten, liest der Server bis
+  zum abschließenden `.` weiter, puffert aber nichts mehr und antwortet dann mit
+  derselben 552-Meldung. Die Session bleibt danach nutzbar.
+- `DATA` wird in Stücken von höchstens 64 KiB gelesen, damit auch eine einzelne
+  überlange Zeile nicht ungeprüft im Speicher landet.
+- Parameter hinter der Adresse in `MAIL FROM` (z. B. `SIZE=`, `BODY=`) werden
+  abgetrennt und nicht als Teil des Absenders gespeichert.
+
 ## Implementierte Befehle
 
 ### EHLO / HELO (RFC 5321 §4.1.1.1)
@@ -30,15 +49,17 @@ DATA-Body eingelesen wird).
 ```
 250-localhost greets you
 250-AUTH LOGIN PLAIN
+250-SIZE 10485760
 250 OK
 ```
 
-`EHLO` liefert eine minimale Extension-Liste: nur `AUTH LOGIN PLAIN`. Es gibt
+`EHLO` liefert eine minimale Extension-Liste: `AUTH LOGIN PLAIN` und `SIZE`
+(RFC 1870) mit der Obergrenze aus `SMTP_MAX_MESSAGE_SIZE`. Es gibt
 keine Auswertung des vom Client übergebenen Domain-Parameters. `HELO`
 antwortet knapp mit `250 localhost` (keine Extension-Liste, wie im RFC für
 den Basis-Befehl vorgesehen).
 
-Nicht beworben und nicht implementiert: `SIZE`, `8BITMIME`, `PIPELINING`,
+Nicht beworben und nicht implementiert: `8BITMIME`, `PIPELINING`,
 `ENHANCEDSTATUSCODES`, `STARTTLS`, `SMTPUTF8`, `CHUNKING`/`BDAT`. Da diese
 nicht in der `EHLO`-Antwort auftauchen, verhalten sich RFC-konforme Clients
 korrekt, indem sie diese Fähigkeiten gar nicht erst nutzen.
@@ -143,22 +164,23 @@ DATA
   selbst mit `.` begann, werden beim Einlesen um dieses eine führende
   `.` reduziert.
 - Das Ende der Daten wird durch eine Zeile erkannt, die exakt `.` ist.
+- Die DATA-Zeilen werden als Bytes gelesen und nicht dekodiert. Eine Mail mit
+  `Content-Transfer-Encoding: 8bit` in ISO-8859-1 oder einem anderen Charset
+  landet Byte für Byte in der `.eml`-Datei. `8BITMIME` bewirbt der Server
+  trotzdem nicht (siehe oben).
 - Nach erfolgreichem Abschluss wird die Nachricht über
   `storage.save_mail(mail_from, rcpt_to, data)` als `<id>.eml` gespeichert
   (siehe [`storage.py`](src/mailserver_mock/storage.py)):
-  - Enthält der rohe Payload keine Zeile mit `SUBJECT:` (Groß-/Kleinschreibung
-    ignoriert), generiert der Mock automatisch `From`/`To`/`Subject`/`Date`-
-    Header und stellt den Original-Payload als Body dahinter — nützlich, wenn
-    ein Test-Client nur den Body ohne Header schickt.
-  - Andernfalls wird angenommen, dass der Client bereits vollständige Header
-    mitgeschickt hat; der Mock stellt nur sicher, dass eine Leerzeile
-    zwischen Headern und Body existiert (RFC 5322 §2.1), falls der Client
-    das vergessen hat.
-  - Diese Heuristik (`"SUBJECT:" not in raw.upper()`) ist eine Vereinfachung:
-    Ein Body-Text, der zufällig das Wort "Subject:" enthält, würde
-    fälschlich als "Client hat Header mitgeschickt" interpretiert.
+  - Der Header-Block endet an der ersten Leerzeile oder an der ersten Zeile,
+    die weder Header-Feld noch Fortsetzungszeile ist. Im zweiten Fall fügt
+    der Mock die fehlende Leerzeile ein (RFC 5322 §2.1).
+  - Fehlen `From`, `To`, `Subject` oder `Date` im Header-Block, stellt der
+    Mock genau diese Header voran. Ein `Subject:` im Body zählt nicht.
+  - Vorhandene Header und der Body bleiben unverändert.
+- `RFC822.SIZE` bei IMAP und `size` in der HTTP-API sind die Bytegröße der
+  `.eml`-Datei, also das, was der Client gesendet hat, plus ergänzte Header.
 - Ist der eingeloggte User im `quota`-Fehlerszenario, wird die Nachricht
-  **nicht gespeichert** — stattdessen antwortet der Server nach dem
+  **nicht gespeichert**. Stattdessen antwortet der Server nach dem
   abschließenden `.` mit dem konfigurierten Fehler (Default
   `552 5.2.2 Mailbox full, quota exceeded`, RFC 3463/RFC 5321 §4.5.3.1.10
   für den 552-Code).
@@ -215,9 +237,10 @@ Jeder unbekannte Befehl (inkl. der oben genannten) wird generisch mit
 - **Kein Empfänger-Limit, keine Relay-Beschränkung**, kein
   `Received:`-Header wird vom Server selbst ergänzt (im Gegensatz zu echten
   MTAs, die pro Hop einen `Received`-Header voranstellen, RFC 5321 §4.4).
-- **Keine Nachrichtengrößenprüfung** — die `552`-Quota-Antwort ist rein
-  konfigurationsgesteuert über `users.json`, nicht von der tatsächlichen
-  Nachrichtengröße abhängig.
+- **Quota unabhängig von der Größe:** Die `552 5.2.2`-Quota-Antwort ist rein
+  konfigurationsgesteuert über `users.json`. Nur die feste Obergrenze
+  `SMTP_MAX_MESSAGE_SIZE` hängt von der tatsächlichen Nachrichtengröße ab
+  (`552 5.3.4`, siehe oben).
 - **Logging:** Nach erfolgreichem `DATA`-Abschluss wird `From`/`To`/`Subject`
   der gespeicherten Nachricht geloggt (`logger.info("incoming ...")`),
   nützlich um in Tests nachzuvollziehen, was tatsächlich empfangen wurde.

@@ -1,5 +1,6 @@
 """SMTP-Mock, orientiert an der gosmtp-Referenz (smtp_test.go)."""
 import base64
+import smtplib
 import time
 import unittest
 from unittest.mock import patch
@@ -11,13 +12,14 @@ from support import (
     read_line,
     reset_mails,
     smtp_auth_login,
+    smtp_ehlo,
     smtp_login,
     smtp_send_mail,
     start_servers,
     write_line,
 )
 
-from mailserver_mock import storage
+from mailserver_mock import connection, smtp_server, storage
 
 setUpModule = start_servers
 
@@ -318,3 +320,126 @@ class HeaderCompletionTests(unittest.TestCase):
         )
         self.assertIn("Subject: Mock Mail 1", headers)
         self.assertEqual(body, "Hallo,\r\nsubject: steht nur im Text\r\n")
+
+
+class SMTPLimitTests(unittest.TestCase):
+    """Timeouts, Zeilenlimit und SIZE (RFC 1870)."""
+
+    def _start_data(self, r, w, mail_from="MAIL FROM:<a@b>"):
+        smtp_login(r, w)
+        write_line(w, mail_from)
+        self.assertIn("250", read_line(r))
+        write_line(w, "RCPT TO:<c@d>")
+        read_line(r)
+        write_line(w, "DATA")
+        self.assertIn("354", read_line(r))
+
+    def test_ehlo_announces_size(self):
+        sock, r, w = dial((SMTP_HOST, SMTP_PORT))
+        try:
+            read_line(r)
+            self.assertIn(f"SIZE {smtp_server.SMTP_MAX_MESSAGE_SIZE}", smtp_ehlo(r, w))
+        finally:
+            sock.close()
+
+    def test_mail_from_size_above_limit_is_rejected(self):
+        sock, r, w = dial((SMTP_HOST, SMTP_PORT))
+        try:
+            smtp_login(r, w)
+            write_line(w, f"MAIL FROM:<a@b> SIZE={smtp_server.SMTP_MAX_MESSAGE_SIZE + 1}")
+            self.assertTrue(read_line(r).startswith("552 5.3.4"))
+            # Ohne gültiges MAIL FROM gibt es kein DATA.
+            write_line(w, "RCPT TO:<c@d>")
+            read_line(r)
+            write_line(w, "DATA")
+            self.assertIn("503", read_line(r))
+        finally:
+            sock.close()
+
+    def test_mail_from_size_param_is_not_part_of_address(self):
+        reset_mails()
+        sock, r, w = dial((SMTP_HOST, SMTP_PORT))
+        try:
+            self._start_data(r, w, "MAIL FROM:<a@b> SIZE=20")
+            write_line(w, "Subject: x\r\n\r\nHallo")
+            write_line(w, ".")
+            self.assertIn("250", read_line(r))
+            self.assertTrue(storage.load_mail(1).startswith(b"From: <a@b>\r\n"))
+        finally:
+            sock.close()
+
+    def test_smtplib_sends_size_and_succeeds(self):
+        reset_mails()
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=5) as client:
+            client.login("testuser", "testpass")
+            self.assertTrue(client.has_extn("size"))
+            client.sendmail("a@b", ["c@d"], "Subject: smtplib\r\n\r\nHallo\r\n")
+        self.assertEqual(storage.count_mails(), 1)
+
+    def test_data_above_limit_is_rejected_and_session_continues(self):
+        reset_mails()
+        sock, r, w = dial((SMTP_HOST, SMTP_PORT))
+        try:
+            with patch.object(smtp_server, "SMTP_MAX_MESSAGE_SIZE", 100):
+                self._start_data(r, w)
+                for _ in range(10):
+                    write_line(w, "x" * 50)
+                write_line(w, ".")
+                self.assertTrue(read_line(r).startswith("552 5.3.4"))
+                self.assertEqual(storage.count_mails(), 0)
+
+                write_line(w, "MAIL FROM:<a@b>")
+                read_line(r)
+                write_line(w, "RCPT TO:<c@d>")
+                read_line(r)
+                write_line(w, "DATA")
+                read_line(r)
+                write_line(w, "klein")
+                write_line(w, ".")
+                self.assertIn("250", read_line(r))
+            self.assertEqual(storage.count_mails(), 1)
+        finally:
+            sock.close()
+
+    def test_long_data_lines_are_read_in_chunks(self):
+        # Kleine Stücke erzwingen Zeilen über mehrere Lesevorgänge, auch mit
+        # einem CRLF, das genau an der Stückgrenze liegt.
+        reset_mails()
+        sock, r, w = dial((SMTP_HOST, SMTP_PORT))
+        try:
+            with patch.object(smtp_server, "_DATA_CHUNK", 8):
+                self._start_data(r, w)
+                write_line(w, "Subject: lang\r\n")
+                write_line(w, "..punkt am Anfang und eine lange Zeile")
+                write_line(w, "1234567")  # 7 Zeichen + CR = 8 Bytes, LF im nächsten Stück
+                write_line(w, "abcdefg.")
+                write_line(w, "x" * 7 + ".")  # Punkt mitten in der Zeile, kein Ende-Marker
+                write_line(w, ".")
+                self.assertIn("250", read_line(r))
+            self.assertEqual(
+                storage.load_mail(1).split(b"\r\n\r\n", 1)[1],
+                b".punkt am Anfang und eine lange Zeile\r\n1234567\r\nabcdefg.\r\nxxxxxxx.\r\n",
+            )
+        finally:
+            sock.close()
+
+    def test_overlong_command_line_is_rejected(self):
+        sock, r, w = dial((SMTP_HOST, SMTP_PORT))
+        try:
+            read_line(r)
+            write_line(w, "NOOP " + "x" * (connection.MAX_LINE * 2))
+            self.assertEqual("500 5.5.2 Line too long", read_line(r))
+            write_line(w, "NOOP")
+            self.assertEqual("250 OK", read_line(r))
+        finally:
+            sock.close()
+
+    def test_idle_client_is_disconnected(self):
+        with patch.object(smtp_server.SMTPHandler, "timeout", 0.3):
+            sock, r, w = dial((SMTP_HOST, SMTP_PORT))
+            try:
+                read_line(r)
+                self.assertTrue(read_line(r).startswith("421 4.4.2"))
+                self.assertEqual(b"", r.readline())
+            finally:
+                sock.close()

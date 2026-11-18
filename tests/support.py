@@ -1,9 +1,9 @@
 """Gemeinsame Hilfen für die End-to-End-Tests.
 
-Kein ``conftest.py``: Die Tests laufen auch mit ``python -m unittest discover``,
-das kennt keine pytest-Fixtures. Jedes Testmodul importiert dieses Modul zuerst
-(MAIL_DIR muss vor dem Import von ``mailserver_mock`` gesetzt sein) und setzt
-``setUpModule = start_servers``.
+Die Tests laufen auch mit ``python -m unittest discover``. Das kennt keine
+pytest-Fixtures, deshalb gibt es kein ``conftest.py``. Jedes Testmodul
+importiert dieses Modul vor ``mailserver_mock``, weil MAIL_DIR vor dem Import
+gesetzt sein muss, und setzt ``setUpModule = start_servers``.
 """
 import base64
 import json
@@ -56,12 +56,20 @@ def write_line(w, s):
 
 # --- SMTP --------------------------------------------------------------------
 
+def smtp_ehlo(r, w):
+    """Schickt EHLO und liefert die Extension-Zeilen (ohne Code) bis zur letzten "250 "-Zeile."""
+    write_line(w, "EHLO localhost")
+    lines = []
+    while True:
+        line = read_line(r)
+        lines.append(line[4:])
+        if not line.startswith("250-"):
+            return lines
+
+
 def smtp_login(r, w):
     read_line(r)  # 220 Banner
-    write_line(w, "EHLO localhost")
-    read_line(r)  # 250-localhost greets you (Begrüßung)
-    read_line(r)  # 250-AUTH LOGIN PLAIN
-    read_line(r)  # 250 OK
+    smtp_ehlo(r, w)
     write_line(w, "AUTH LOGIN")
     read_line(r)  # 334 Benutzername:
     write_line(w, base64.b64encode(b"testuser").decode())
@@ -75,10 +83,7 @@ def smtp_auth_login(r, w, username, password):
     """Führt EHLO + AUTH LOGIN mit beliebigen Zugangsdaten aus und gibt die
     finale Server-Antwort zurück (ohne Erfolg vorauszusetzen)."""
     read_line(r)  # 220 Banner
-    write_line(w, "EHLO localhost")
-    read_line(r)
-    read_line(r)
-    read_line(r)
+    smtp_ehlo(r, w)
     write_line(w, "AUTH LOGIN")
     read_line(r)  # 334 Benutzername:
     write_line(w, base64.b64encode(username.encode()).decode())

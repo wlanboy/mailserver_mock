@@ -23,6 +23,19 @@ merkt sich zwei Dinge: `auth` (eingeloggt) und `selected` (keine Mailbox,
 `EXPUNGE` verlangen eine ausgewählte Mailbox. `FETCH`, `STORE` und `SEARCH`
 prüfen aus Kompatibilitätsgründen weiterhin nur `auth`.
 
+### Timeout und Zeilenlimits
+
+- **Timeout.** Jede Verbindung bekommt ein Socket-Timeout von `IMAP_TIMEOUT`
+  Sekunden (Default 1800). Das entspricht dem Autologout-Minimum aus RFC 3501
+  §5.4 und passt zu IDLE, das Clients laut RFC 2177 spätestens alle 29 Minuten
+  erneuern. Danach sendet der Server `* BYE Autologout; idle for too long` und
+  schließt die Verbindung. `IMAP_TIMEOUT=0` schaltet das Timeout ab.
+- **Zeilenlänge.** Eine Zeile darf höchstens 8 KiB lang sein, sonst antwortet
+  der Server mit `<tag> BAD Command line too long` und verwirft den Rest der
+  Zeile.
+- **Literale.** Ein Kommando darf samt aller Literale höchstens 64 KiB groß
+  sein, sonst `<tag> BAD Literal too large`.
+
 ## Implementierte Befehle
 
 ### CAPABILITY (RFC 3501 §6.1.1)
@@ -321,9 +334,10 @@ den generischen `else`-Zweig mit `<tag> BAD Unknown command` beantwortet:
 ## Weitere Vereinfachungen
 
 - **Kommando-Parsing.** Zeilen werden mit `line.split(" ", 2)` in maximal drei
-  Teile zerlegt (Tag, Kommando, Rest). Die IMAP-Literal-Syntax
-  (`{octet-count}\r\n`) für lange oder binäre Argumente wird nirgends
-  unterstützt.
+  Teile zerlegt (Tag, Kommando, Rest). Synchronisierende Literale
+  (`{octet-count}\r\n`) werden vorher eingelesen und als Quoted-String in die
+  Zeile eingesetzt; nicht-synchronisierende Literale (`{n+}`, RFC 7888) gibt es
+  nicht.
 - **Lockerer Selected-State.** `FETCH`/`STORE`/`SEARCH` funktionieren auch
   ohne vorheriges `SELECT`, geprüft wird nur der Login.
 - **Sequenznummern sind nicht eingefroren.** Ein echter Server hält die

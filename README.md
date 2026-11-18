@@ -18,6 +18,16 @@ Standard-Zugangsdaten: `testuser` / `testpass`
 Alle Werte lassen sich per Umgebungsvariable überschreiben:
 `SMTP_HOST`, `SMTP_PORT`, `IMAP_HOST`, `IMAP_PORT`, `HTTP_HOST`, `HTTP_PORT`, `MAIL_USER`, `MAIL_PASS`, `MAIL_DIR`, `USERS_FILE`.
 
+Robustheit gegen hängende oder zu große Verbindungen:
+
+| Variable | Default | Wirkung |
+|----------|---------|---------|
+| `SMTP_TIMEOUT` | `300` | Sekunden ohne Daten vom Client, danach `421 4.4.2` und Verbindungsabbau. `0` schaltet ab. |
+| `IMAP_TIMEOUT` | `1800` | Sekunden ohne Daten vom Client (auch während `IDLE`), danach `* BYE` und Verbindungsabbau. `0` schaltet ab. |
+| `SMTP_MAX_MESSAGE_SIZE` | `10485760` | Größte Mail in Bytes, im `EHLO` als `SIZE` angekündigt. Größere Mails lehnt der Server mit `552 5.3.4` ab. |
+
+Kommandozeilen sind bei SMTP und IMAP auf 8 KiB begrenzt.
+
 ## Test-User & simulierte Fehlerszenarien (`users.json`)
 
 Zugangsdaten werden aus `users.json` (Pfad überschreibbar via `USERS_FILE`,
