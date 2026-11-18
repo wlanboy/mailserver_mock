@@ -1,4 +1,5 @@
-"""Minimaler IMAP4rev1-Mock: LOGIN, LIST, SELECT, FETCH, UID, STORE, SEARCH, IDLE, LOGOUT."""
+"""Minimaler IMAP4rev1-Mock: LOGIN, LIST, SELECT/EXAMINE, STATUS, FETCH, UID, STORE,
+SEARCH, NOOP, CHECK, EXPUNGE, CLOSE, IDLE, LOGOUT."""
 import logging
 import os
 import re
@@ -7,7 +8,7 @@ import socketserver
 import time
 from email import message_from_string
 
-from . import storage, users
+from . import imap_fetch, storage, users
 
 IMAP_HOST = os.environ.get("IMAP_HOST", "127.0.0.1")
 IMAP_PORT = int(os.environ.get("IMAP_PORT", "1143"))
@@ -117,17 +118,9 @@ def _search_text_matches(msg_id, key, needle):
     return needle in haystack.lower()
 
 
-def _fetch_marks_seen(items):
-    """Prüft, ob angefragte FETCH-Items laut RFC 3501 §6.4.5 implizit \\Seen setzen.
-
-    BODY.PEEK[...] und RFC822.HEADER/.SIZE setzen \\Seen nicht; jedes andere
-    BODY[...] sowie das nackte RFC822/RFC822.TEXT-Makro schon.
-    """
-    upper = items.upper()
-    without_peek = upper.replace("BODY.PEEK[", "")
-    if "BODY[" in without_peek:
-        return True
-    return bool(re.search(r"RFC822(?!\.(?:HEADER|SIZE))\b", upper))
+_SYSTEM_FLAGS = "\\Answered \\Flagged \\Deleted \\Seen \\Draft"
+_READ_WRITE = "READ-WRITE"
+_READ_ONLY = "READ-ONLY"
 
 
 class IMAPHandler(socketserver.StreamRequestHandler):
@@ -173,6 +166,8 @@ class IMAPHandler(socketserver.StreamRequestHandler):
 
         self.auth = False
         self.quota_error = None
+        self.selected = None  # None, _READ_WRITE (SELECT) oder _READ_ONLY (EXAMINE)
+        self.known_uids = []  # UIDs, die der Client nach dem letzten Bericht kennt
 
         while True:
             line = self._read_command()
@@ -207,18 +202,34 @@ class IMAPHandler(socketserver.StreamRequestHandler):
                 self._write('* LIST (\\HasNoChildren) "/" "INBOX"')
                 self._write(f"{tag} OK LIST completed")
 
-            elif cmd == "SELECT":
+            elif cmd in ("SELECT", "EXAMINE"):
                 if not self.auth:
                     self._write(f"{tag} NO Authenticate first")
                     continue
-                if self.quota_error:
-                    self._write(f"{tag} NO {_format_response_code(self.quota_error, 'OVERQUOTA', 'Quota exceeded')}")
+                self._handle_select(tag, cmd)
+
+            elif cmd == "NOOP":
+                self._report_changes()
+                self._write(f"{tag} OK NOOP completed")
+
+            elif cmd in ("CHECK", "CLOSE", "EXPUNGE"):
+                if not self.auth:
+                    self._write(f"{tag} NO Authenticate first")
                     continue
-                count = storage.count_mails()
-                self._write(f"* {count} EXISTS")
-                self._write("* FLAGS (\\Seen \\Deleted \\Answered)")
-                self._write("* OK [PERMANENTFLAGS (\\Seen \\Deleted \\Answered)]")
-                self._write(f"{tag} OK [READ-WRITE] SELECT completed")
+                if self.selected is None:
+                    self._write(f"{tag} BAD No mailbox selected")
+                    continue
+                if cmd == "CHECK":
+                    self._report_changes()
+                    self._write(f"{tag} OK CHECK completed")
+                elif cmd == "CLOSE":
+                    if self.selected == _READ_WRITE:
+                        self._expunge_deleted()  # CLOSE löscht ohne EXPUNGE-Antworten
+                    self.selected = None
+                    self.known_uids = []
+                    self._write(f"{tag} OK CLOSE completed")
+                else:
+                    self._handle_expunge(tag)
 
             elif cmd == "STATUS":
                 if not self.auth:
@@ -290,6 +301,79 @@ class IMAPHandler(socketserver.StreamRequestHandler):
         response = _format_response_code(account.get("imap", {}), "UNAVAILABLE", "Temporary failure, please try again later")
         self._write(f"{tag} NO {response}")
 
+    def _handle_select(self, tag, cmd):
+        # Ein fehlgeschlagenes SELECT hebt die bisherige Auswahl auf (RFC 3501 §6.3.1).
+        self.selected = None
+        self.known_uids = []
+        if self.quota_error:
+            self._write(f"{tag} NO {_format_response_code(self.quota_error, 'OVERQUOTA', 'Quota exceeded')}")
+            return
+
+        mode = _READ_ONLY if cmd == "EXAMINE" else _READ_WRITE
+        uids = storage.list_ids()
+        first_unseen = next(
+            (n for n, uid in enumerate(uids, start=1) if "\\Seen" not in storage.load_flags(uid)),
+            None,
+        )
+        permanent = f"{_SYSTEM_FLAGS} \\*" if mode == _READ_WRITE else ""
+
+        self._write(f"* FLAGS ({_SYSTEM_FLAGS})")
+        self._write(f"* OK [PERMANENTFLAGS ({permanent})] Flags permitted")
+        self._write(f"* {len(uids)} EXISTS")
+        self._write("* 0 RECENT")
+        if first_unseen is not None:
+            self._write(f"* OK [UNSEEN {first_unseen}] First unseen")
+        self._write(f"* OK [UIDVALIDITY {storage.uid_validity()}] UIDs valid")
+        self._write(f"* OK [UIDNEXT {storage.next_id()}] Predicted next UID")
+        self.selected = mode
+        self.known_uids = uids
+        self._write(f"{tag} OK [{mode}] {cmd} completed")
+
+    def _report_changes(self):
+        """Meldet Mails, die seit dem letzten Bericht verschwunden oder neu sind.
+
+        Das ist der Grund, warum Clients NOOP schicken: neue Mails tauchen als
+        ``* <n> EXISTS`` auf, extern gelöschte als ``* <n> EXPUNGE``.
+        """
+        if self.selected is None:
+            return
+        current = storage.list_ids()
+        present = set(current)
+        # Absteigend melden, dann bleiben die Sequenznummern davor gültig.
+        for seq in range(len(self.known_uids), 0, -1):
+            if self.known_uids[seq - 1] not in present:
+                self._write(f"* {seq} EXPUNGE")
+        remaining = sum(1 for uid in self.known_uids if uid in present)
+        if len(current) > remaining:
+            self._write(f"* {len(current)} EXISTS")
+        self.known_uids = current
+
+    def _expunge_deleted(self):
+        """Löscht alle Mails mit \\Deleted, liefert die zu meldenden Sequenznummern.
+
+        Jede EXPUNGE-Antwort verschiebt die folgenden Nummern sofort um eins
+        (RFC 3501 §7.4.1), daher wird der Versatz mitgezählt.
+        """
+        uids = storage.list_ids()
+        expunged = []
+        kept = []
+        for seq, uid in enumerate(uids, start=1):
+            if "\\Deleted" in storage.load_flags(uid) and storage.delete_mail(uid):
+                expunged.append(seq - len(expunged))
+            else:
+                kept.append(uid)
+        self.known_uids = kept
+        return expunged
+
+    def _handle_expunge(self, tag):
+        if self.selected == _READ_ONLY:
+            self._write(f"{tag} NO Mailbox is read-only")
+            return
+        self._report_changes()  # Sequenznummern des Clients auf den aktuellen Stand bringen
+        for seq in self._expunge_deleted():
+            self._write(f"* {seq} EXPUNGE")
+        self._write(f"{tag} OK EXPUNGE completed")
+
     def _handle_status(self, tag, args):
         paren_start = args.find("(")
         paren_end = args.rfind(")")
@@ -306,7 +390,7 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             "MESSAGES": len(uids),
             "RECENT": 0,
             "UIDNEXT": storage.next_id(),
-            "UIDVALIDITY": 1,
+            "UIDVALIDITY": storage.uid_validity(),
             "UNSEEN": unseen,
         }
 
@@ -345,39 +429,36 @@ class IMAPHandler(socketserver.StreamRequestHandler):
 
     def _handle_fetch(self, tag, args, is_uid=False):
         fields = args.split(None, 1)
-        if not fields:
+        if len(fields) < 2 or not _SEQ_SET_RE.match(fields[0]):
             self._write(f"{tag} BAD FETCH syntax")
             return
+        try:
+            items = imap_fetch.parse_items(fields[1])
+        except ValueError as exc:
+            self._write(f"{tag} BAD FETCH {exc}")
+            return
 
-        messages = _resolve_messages(fields[0], storage.list_ids(), is_uid)
-        mark_seen = _fetch_marks_seen(fields[1] if len(fields) > 1 else "")
+        mark_seen = self.selected != _READ_ONLY and imap_fetch.marks_seen(items)
+        log_content = imap_fetch.delivers_content(items)
 
-        for seq, msg_id in messages:
+        for seq, msg_id in _resolve_messages(fields[0], storage.list_ids(), is_uid):
             flags = storage.load_flags(msg_id)
-            if mark_seen and "\\Seen" not in flags:
+            flags_changed = mark_seen and "\\Seen" not in flags
+            if flags_changed:
                 flags.append("\\Seen")
                 storage.save_flags(msg_id, flags)
-            body_str = storage.load_mail(msg_id)
-            envelope = storage.get_envelope(body_str)
-            body = body_str.encode("utf-8")
 
-            headers = message_from_string(body_str)
-            logger.info(
-                "outgoing id=%s from=%s to=%s subject=%r",
-                msg_id,
-                headers.get("From", "NIL"),
-                headers.get("To", "NIL"),
-                headers.get("Subject", ""),
-            )
+            message = imap_fetch.StoredMessage(msg_id)
+            self.wfile.write(imap_fetch.render(seq, message, flags, items, include_uid=is_uid, include_flags=flags_changed))
 
-            self.wfile.write(
-                (
-                    f"* {seq} FETCH (UID {msg_id} FLAGS ({' '.join(flags)}) "
-                    f"ENVELOPE {envelope} BODY[] {{{len(body)}}}\r\n"
-                ).encode("utf-8")
-            )
-            self.wfile.write(body)
-            self.wfile.write(b")\r\n")
+            if log_content:
+                logger.info(
+                    "outgoing id=%s from=%s to=%s subject=%r",
+                    msg_id,
+                    message.parsed.get("From", "NIL"),
+                    message.parsed.get("To", "NIL"),
+                    message.parsed.get("Subject", ""),
+                )
         self.wfile.flush()
 
         self._write(f"{tag} OK FETCH completed")
@@ -397,6 +478,9 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             return
         if action not in ("FLAGS", "FLAGS.SILENT", "+FLAGS", "+FLAGS.SILENT", "-FLAGS", "-FLAGS.SILENT"):
             self._write(f"{tag} BAD STORE action")
+            return
+        if self.selected == _READ_ONLY:
+            self._write(f"{tag} NO Mailbox is read-only")
             return
 
         for seq, msg_id in _resolve_messages(seq_set, storage.list_ids(), is_uid):

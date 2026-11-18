@@ -52,10 +52,13 @@ SASL-Continuation, wie z. B. Jakarta Mail/Spring Boot es nutzt), `MAIL FROM`,
 `QUIT`, Auth-Pflicht vor `MAIL FROM`/`RCPT TO`/`DATA`, mehrere Mails pro
 Session.
 
-**IMAP:** `CAPABILITY`, `LOGIN`, `LIST`, `SELECT`, `STATUS`, `FETCH`,
-`UID FETCH`, `UID SEARCH`, `UID STORE`, `STORE` (`FLAGS`/`+FLAGS`/`-FLAGS`,
-inkl. `.SILENT`), `SEARCH`, `IDLE`, `LOGOUT`. `FETCH`/`UID FETCH` setzen
-`\Seen` implizit, außer bei `BODY.PEEK[...]` (RFC 3501 §6.4.5).
+**IMAP:** `CAPABILITY`, `LOGIN`, `LIST`, `SELECT` (mit `UIDVALIDITY`/`UIDNEXT`/`UNSEEN`),
+`EXAMINE`, `STATUS`, `FETCH`, `UID FETCH`, `UID SEARCH`, `UID STORE`, `STORE`
+(`FLAGS`/`+FLAGS`/`-FLAGS`, inkl. `.SILENT`), `SEARCH`, `NOOP`, `CHECK`, `EXPUNGE`,
+`CLOSE`, `IDLE`, `LOGOUT`. `FETCH` liefert nur die angefragten Items (`FLAGS`, `UID`,
+`ENVELOPE`, `INTERNALDATE`, `RFC822*`, `BODY[...]` inkl. `HEADER.FIELDS` und Partial,
+`BODYSTRUCTURE`) und setzt `\Seen` implizit, außer bei `BODY.PEEK[...]` (RFC 3501 §6.4.5).
+`NOOP` meldet neue Mails als `* n EXISTS`.
 
 **HTTP:** kleine JSON-API und Web-UI nach dem Vorbild von MailHog/Mailpit,
 siehe [HTTP-API & Web-UI](#http-api--web-ui).
@@ -103,7 +106,9 @@ angekommen ist, ohne IMAP zu sprechen:
 | `DELETE` | `/mails/{id}`      | Eine Mail löschen, `204` bzw. `404` |
 
 `{id}` entspricht der IMAP-UID bzw. dem Dateinamen `<id>.eml`. Die API setzt keine IMAP-Flags;
-`seen`/`flags` zeigen den aktuellen Stand aus IMAP.
+`seen`/`flags` zeigen den aktuellen Stand aus IMAP. `DELETE /mails` setzt die IDs zurück auf 1
+und vergibt eine neue IMAP-`UIDVALIDITY`, damit IMAP-Clients ihren Cache verwerfen. Einzeln
+gelöschte IDs werden nicht neu vergeben (Zähler in `MAIL_DIR/.uidnext`).
 
 ```bash
 curl -s localhost:8025/health

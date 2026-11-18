@@ -9,6 +9,7 @@ auch mit dem anderen kompatibel ist.
 import os
 import re
 import threading
+import time
 from email import message_from_string
 from email.parser import HeaderParser
 from email.utils import formatdate, getaddresses
@@ -17,6 +18,12 @@ from pathlib import Path
 MAIL_DIR = Path(os.environ.get("MAIL_DIR", "mails"))
 
 _lock = threading.Lock()
+
+# Zustandsdateien neben den Mails. Sie beginnen mit einem Punkt und passen
+# damit nicht auf die Muster ``*.eml``/``*.flags``.
+_UIDNEXT_FILE = ".uidnext"
+_UIDVALIDITY_FILE = ".uidvalidity"
+_last_uid_validity = 0
 
 
 def ensure_mail_dir():
@@ -83,9 +90,39 @@ def list_ids():
     return ids
 
 
+def _read_int(name):
+    try:
+        return int((MAIL_DIR / name).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
 def next_id():
+    """Nächste freie UID.
+
+    Neben der höchsten vorhandenen ID zählt der in ``.uidnext`` gemerkte
+    Höchststand. Wird die neueste Mail per EXPUNGE oder HTTP-API gelöscht,
+    bekommt die nächste Mail trotzdem eine neue UID (RFC 3501 §2.3.1.1).
+    """
     ids = list_ids()
-    return (ids[-1] if ids else 0) + 1
+    return max((ids[-1] if ids else 0) + 1, _read_int(_UIDNEXT_FILE))
+
+
+def uid_validity():
+    """UIDVALIDITY der Mailbox, wird beim ersten Zugriff angelegt.
+
+    ``delete_all`` löscht die Datei, danach beginnen die UIDs wieder bei 1.
+    Der neue Wert ist größer als jeder zuvor in diesem Prozess vergebene,
+    damit Clients ihren UID-Cache verwerfen.
+    """
+    global _last_uid_validity
+    with _lock:
+        value = _read_int(_UIDVALIDITY_FILE)
+        if value < 1:
+            value = max(int(time.time()), _last_uid_validity + 1)
+            (MAIL_DIR / _UIDVALIDITY_FILE).write_text(str(value), encoding="utf-8")
+        _last_uid_validity = max(_last_uid_validity, value)
+        return value
 
 
 def count_mails():
@@ -122,6 +159,7 @@ def save_mail(from_addr, to_addrs, raw):
         with open(_eml_path(msg_id), "w", encoding="utf-8", newline="") as f:
             f.write(content)
         _flags_path(msg_id).write_text("", encoding="utf-8")
+        (MAIL_DIR / _UIDNEXT_FILE).write_text(str(msg_id + 1), encoding="utf-8")
         return msg_id
 
 
@@ -173,10 +211,12 @@ def delete_all():
             _flags_path(msg_id).unlink(missing_ok=True)
         for orphan in MAIL_DIR.glob("*.flags"):
             orphan.unlink(missing_ok=True)
+        (MAIL_DIR / _UIDNEXT_FILE).unlink(missing_ok=True)
+        (MAIL_DIR / _UIDVALIDITY_FILE).unlink(missing_ok=True)
         return len(ids)
 
 
-def _imap_string(value):
+def imap_string(value):
     """Kodiert einen Wert als IMAP-String (RFC 3501 §4.3).
 
     Reines ASCII ohne CR/LF wird als quoted string mit escaptem \\ und "
@@ -203,12 +243,12 @@ def _format_addr_list(msg, header_name):
         return "NIL"
     parts = []
     for name, addr in addrs:
-        name_part = _imap_string(name) if name else "NIL"
+        name_part = imap_string(name) if name else "NIL"
         if "@" in addr:
             mailbox, host = addr.split("@", 1)
         else:
             mailbox, host = "user", "unknown"
-        parts.append(f"({name_part} NIL {_imap_string(mailbox)} {_imap_string(host)})")
+        parts.append(f"({name_part} NIL {imap_string(mailbox)} {imap_string(host)})")
     return "(" + " ".join(parts) + ")"
 
 
@@ -225,4 +265,4 @@ def get_envelope(raw):
     reply_to = _format_addr_list(msg, "Reply-To")
     to = _format_addr_list(msg, "To")
 
-    return f"({_imap_string(date)} {_imap_string(subject)} {from_} {from_} {reply_to} {to} NIL NIL NIL NIL)"
+    return f"({imap_string(date)} {imap_string(subject)} {from_} {from_} {reply_to} {to} NIL NIL NIL NIL)"

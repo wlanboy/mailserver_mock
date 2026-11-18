@@ -6,7 +6,7 @@ implementiert, wie sich die Befehle im Detail verhalten und welche Teile des
 RFCs bewusst ausgelassen wurden. Ziel des Mocks ist **nicht** Vollständigkeit,
 sondern ein Server, der reale IMAP-Clients (z. B. `imaplib`, Jakarta Mail,
 Thunderbird) für Testzwecke bedienen kann, ohne eine echte Mailbox-Semantik
-(Persistenz über Sessions, mehrere Ordner, Expunge, ...) nachzubilden.
+(mehrere Ordner, `\Recent`, Push bei IDLE, ...) nachzubilden.
 
 ## Session-Ablauf
 
@@ -17,12 +17,11 @@ Nach Verbindungsaufbau sendet der Server sofort eine Greeting-Zeile:
 ```
 
 Danach liest der Server zeilenweise Client-Kommandos im Format
-`<tag> <command> [args]` (RFC 3501 §2.2, "Client Protocol Sender"). Es wird
-**nicht** zwischen Connection-State (Not Authenticated / Authenticated /
-Selected) unterschieden — stattdessen gibt es nur ein einziges Flag `auth`.
-Befehle, die laut RFC einen ausgewählten Mailbox-State voraussetzen (z. B.
-`FETCH`), prüfen daher nur `auth`, nicht ob zuvor tatsächlich `SELECT`
-aufgerufen wurde.
+`<tag> <command> [args]` (RFC 3501 §2.2, "Client Protocol Sender"). Die Session
+merkt sich zwei Dinge: `auth` (eingeloggt) und `selected` (keine Mailbox,
+`READ-WRITE` nach `SELECT`, `READ-ONLY` nach `EXAMINE`). `CHECK`, `CLOSE` und
+`EXPUNGE` verlangen eine ausgewählte Mailbox. `FETCH`, `STORE` und `SEARCH`
+prüfen aus Kompatibilitätsgründen weiterhin nur `auth`.
 
 ## Implementierte Befehle
 
@@ -79,20 +78,31 @@ Sonderfälle wie leere Referenz/leeres Pattern (RFC 3501 §6.3.8, Sonderfall
 
 ### SELECT (RFC 3501 §6.3.1)
 
-Der übergebene Mailbox-Name wird ignoriert — es wird immer dieselbe (einzige)
-Mailbox "geöffnet". Antwort:
+Der Server ignoriert den übergebenen Mailbox-Namen und öffnet immer die
+einzige Mailbox. Antwort:
 
 ```
+* FLAGS (\Answered \Flagged \Deleted \Seen \Draft)
+* OK [PERMANENTFLAGS (\Answered \Flagged \Deleted \Seen \Draft \*)] Flags permitted
 * <n> EXISTS
-* FLAGS (\Seen \Deleted \Answered)
-* OK [PERMANENTFLAGS (\Seen \Deleted \Answered)]
+* 0 RECENT
+* OK [UNSEEN <seq>] First unseen
+* OK [UIDVALIDITY <v>] UIDs valid
+* OK [UIDNEXT <uid>] Predicted next UID
 a OK [READ-WRITE] SELECT completed
 ```
 
-`<n>` ist `storage.count_mails()`, also die Anzahl der `.eml`-Dateien im
-`MAIL_DIR`. Nicht implementiert: `* <n> RECENT`, `UIDVALIDITY`,
-`UIDNEXT`, `UNSEEN`-Response-Code — Clients, die diese für korrektes
-UID-Handling benötigen, bekommen sie nicht.
+- `<n>` ist die Anzahl der `.eml`-Dateien im `MAIL_DIR`.
+- `UNSEEN` nennt die Sequenznummer der ersten Mail ohne `\Seen` und fehlt,
+  wenn alle gelesen sind.
+- `UIDVALIDITY` steht in `MAIL_DIR/.uidvalidity` und wird beim ersten Zugriff
+  aus der aktuellen Uhrzeit angelegt. `DELETE /mails` (HTTP) löscht die Datei,
+  danach beginnen die UIDs wieder bei 1 und es gibt eine neue, größere
+  `UIDVALIDITY`.
+- `UIDNEXT` ist `storage.next_id()`: die höchste vorhandene UID plus 1, aber
+  mindestens der Stand in `MAIL_DIR/.uidnext`. Wird die neueste Mail gelöscht,
+  wird ihre UID nicht neu vergeben (RFC 3501 §2.3.1.1).
+- `RECENT` ist immer 0, der Mock bildet `\Recent` nicht nach.
 
 Ist der eingeloggte User im `quota`-Fehlerszenario, antwortet `SELECT`
 stattdessen mit `NO` und dem konfigurierten Response-Code/Message aus
@@ -100,8 +110,12 @@ stattdessen mit `NO` und dem konfigurierten Response-Code/Message aus
 ("IMAP4 Response Codes"), das `OVERQUOTA` als Standard-Response-Code
 definiert.
 
-`EXAMINE` (read-only-Variante von `SELECT`, RFC 3501 §6.3.2) ist **nicht**
-implementiert.
+### EXAMINE (RFC 3501 §6.3.2)
+
+Liefert dieselben Antworten wie `SELECT`, aber mit `PERMANENTFLAGS ()` und
+`OK [READ-ONLY] EXAMINE completed`. Im Read-only-Zustand setzt `FETCH` kein
+implizites `\Seen`, `STORE` und `EXPUNGE` antworten mit
+`NO Mailbox is read-only`.
 
 ### STATUS (RFC 3501 §6.3.10)
 
@@ -120,8 +134,7 @@ Unterstützte Items:
 - `MESSAGES` — `storage.count_mails()`, identisch zu `SELECT`s `EXISTS`.
 - `RECENT` — immer `0`, da der Mock kein `\Recent`-Flag nachbildet.
 - `UIDNEXT` — `storage.next_id()`.
-- `UIDVALIDITY` — konstant `1`, da die (einzige) Mailbox nie neu angelegt
-  wird und UIDs nie invalidiert werden.
+- `UIDVALIDITY` — derselbe Wert wie bei `SELECT`.
 - `UNSEEN` — Anzahl der Nachrichten, deren gespeicherte Flags **kein**
   `\Seen` enthalten (linear über `storage.load_flags` pro Nachricht
   ermittelt, kein Caching).
@@ -135,40 +148,45 @@ ignoriert statt mit `BAD` abgelehnt.
 a FETCH <sequence-set> <items>
 ```
 
-Der `<sequence-set>` wird über `_parse_seq_set` interpretiert (unterstützt
-Einzel-IDs, `*` für die höchste Nachrichtennummer, Bereiche `a:b` und
-Kommalisten, z. B. `1,3,5:7`). Der `<items>`-Teil bestimmt **nicht**, welche
-Daten geliefert werden — unabhängig davon, ob der Client `(FLAGS)`,
-`(BODY[HEADER])` oder `(RFC822.SIZE)` anfragt, liefert der Server für jede
-passende Nachricht immer denselben festen Datensatz:
+Der `<sequence-set>` wird über `_parse_seq_set` interpretiert (Einzel-IDs,
+`*`, Bereiche `a:b`, Kommalisten wie `1,3,5:7`). `<items>` ist ein einzelnes
+Item oder eine Liste in Klammern. Geliefert werden genau die angefragten Items
+in der angefragten Reihenfolge ([`imap_fetch.py`](src/mailserver_mock/imap_fetch.py)):
 
-```
-* <id> FETCH (UID <id> FLAGS (...) ENVELOPE (...) BODY[] {<n>}
-<n Bytes Rohnachricht>
-)
-```
+| Item | Antwort |
+|---|---|
+| `FLAGS` | gespeicherte Flags |
+| `UID` | UID der Mail (bei `UID FETCH` immer enthalten, auch ungefragt) |
+| `ENVELOPE` | siehe unten |
+| `INTERNALDATE` | mtime der `.eml`-Datei in UTC, z. B. `"18-Nov-2026 10:53:18 +0000"` |
+| `RFC822.SIZE` | Größe der Rohnachricht in Bytes |
+| `RFC822`, `RFC822.HEADER`, `RFC822.TEXT` | ganze Nachricht, Header-Block, Body |
+| `BODY[]`, `BODY[HEADER]`, `BODY[TEXT]` | ganze Nachricht, Header-Block inkl. Leerzeile, Body |
+| `BODY[HEADER.FIELDS (A B)]`, `BODY[HEADER.FIELDS.NOT (A B)]` | nur die genannten bzw. alle anderen Header-Felder, gefaltete Zeilen bleiben erhalten |
+| `BODY[1]`, `BODY[1.2]`, `BODY[2.MIME]` | Inhalt bzw. MIME-Header eines MIME-Parts. Eine Nachricht ohne Multipart hat nur Part `1` (ihren Body) |
+| `BODY[...]<start.length>` | Ausschnitt in Bytes, Antwort als `BODY[...]<start>` |
+| `BODY`, `BODYSTRUCTURE` | MIME-Struktur ohne Extension-Daten (die sind laut Grammatik optional) |
+| `ALL`, `FAST`, `FULL` | Makros nach RFC 3501 |
 
-Damit sind insbesondere folgende FETCH-Items **nicht** unterstützt:
-`BODY[HEADER]`, `BODY[TEXT]`, `BODY[]<start.length>` (partial fetch),
-`BODYSTRUCTURE`, `RFC822.SIZE`, `INTERNALDATE`. Clients, die gezielt nur
-Header oder nur einen Teilbereich abrufen wollen, bekommen trotzdem immer
-die komplette Nachricht.
+`BODY.PEEK[...]` liefert dasselbe wie `BODY[...]`, die Antwort heißt `BODY[...]`.
+Unbekannte Items, ein fehlender Item-Teil oder `HEADER.FIELDS` ohne Feldliste
+werden mit `BAD` abgelehnt.
 
-`<items>` wird aber ausgewertet, um zu entscheiden, ob die Nachricht
-implizit `\Seen` gesetzt bekommt (`_fetch_marks_seen` in `imap_server.py`,
-RFC 3501 §6.4.5): jedes `BODY[...]` ohne `.PEEK` sowie das nackte
-`RFC822`-/`RFC822.TEXT`-Makro markieren als gelesen und schreiben das
-aktualisierte Flag-Set über `storage.save_flags` zurück; `BODY.PEEK[...]`
-sowie `RFC822.HEADER`/`RFC822.SIZE` lassen `\Seen` unangetastet. Das ist die
-einzige Stelle, an der `<items>` das Serververhalten beeinflusst — welche
-konkreten Daten zurückgeliefert werden, bleibt davon unberührt.
+`\Seen` wird implizit gesetzt bei jedem `BODY[...]` ohne `.PEEK` sowie bei
+`RFC822` und `RFC822.TEXT`; `BODY.PEEK[...]`, `RFC822.HEADER` und
+`RFC822.SIZE` lassen es unangetastet. Nach `EXAMINE` wird nie `\Seen` gesetzt.
+Ändert sich `\Seen` und hat der Client `FLAGS` nicht angefragt, hängt der
+Server `FLAGS (...)` an die Antwort an, damit der Client den neuen Stand kennt.
+
+Die Mail wird nur von der Platte gelesen, wenn ein Item ihren Inhalt braucht.
+`FETCH 1:* (UID FLAGS)` öffnet also keine `.eml`-Datei.
 
 Die `ENVELOPE`-Struktur wird in
 [`storage.get_envelope`](src/mailserver_mock/storage.py) gebaut und folgt dem
 in RFC 3501 §7.4.2 definierten Format
-`(date subject from sender reply-to to cc bcc in-reply-to message-id)` —
-`sender` wird dabei mit `from` gleichgesetzt, `cc`/`bcc`/`in-reply-to`/
-`message-id` sind immer `NIL`.
+`(date subject from sender reply-to to cc bcc in-reply-to message-id)`.
+`sender` ist dabei gleich `from`, `cc`/`bcc`/`in-reply-to`/`message-id` sind
+immer `NIL`.
 
 ### UID (RFC 3501 §6.4.8)
 
@@ -177,13 +195,12 @@ a UID FETCH <ids> <items>
 a UID SEARCH <criteria>
 ```
 
-`UID FETCH` wird 1:1 an `_handle_fetch` durchgereicht, `UID SEARCH` an
-`_handle_search`, `UID STORE` an `_handle_store` (mit `is_uid=True`). Das
-funktioniert nur deshalb korrekt, weil im Mock die Message-ID
-**gleichzeitig als Sequenznummer und als UID** verwendet wird (Nachrichten
-werden nie umnummeriert oder gelöscht/expunged, siehe unten) — echte
-IMAP-Server müssen UID und Sequenznummer sauber trennen, da UIDs über
-Sessions stabil bleiben müssen, Sequenznummern aber nicht.
+`UID FETCH` wird an `_handle_fetch` durchgereicht, `UID SEARCH` an
+`_handle_search`, `UID STORE` an `_handle_store` (jeweils mit `is_uid=True`).
+`_resolve_messages` bildet Sequenznummern und UIDs aufeinander ab: Die
+Sequenznummern 1..N gehören zu den aufsteigend sortierten UIDs der
+vorhandenen `.eml`-Dateien. Lücken durch gelöschte Mails bleiben Lücken in
+den UIDs.
 
 `UID STORE` unterscheidet sich von der Sequenznummer-Variante nur darin,
 dass die unsolicited `* <n> FETCH (...)`-Response (falls nicht `.SILENT`)
@@ -199,10 +216,9 @@ a STORE <msg-num> <FLAGS|+FLAGS|-FLAGS>[.SILENT] (<flag list>)
 Unterstützt alle vier Standard-Varianten (`FLAGS`, `+FLAGS`, `-FLAGS`, jeweils
 mit optionalem `.SILENT`-Suffix). Bei `.SILENT` wird die sonst übliche
 `* <n> FETCH (FLAGS (...))`-Untagged-Response unterdrückt, wie in RFC 3501
-§6.4.6 beschrieben. `<msg-num>` wird als reiner String an
-`storage.load_flags`/`save_flags` durchgereicht — es gibt keine Validierung,
-dass die Nachricht existiert, und keine Sequence-Set-Syntax (Bereiche/Kommas)
-wie bei `FETCH`, sondern nur eine einzelne ID.
+§6.4.6 beschrieben. `<msg-num>` ist ein Sequence-Set wie bei `FETCH`
+(`1`, `2:4`, `1,3:*`), ungültige Sets werden mit `BAD` abgelehnt. Nach
+`EXAMINE` antwortet `STORE` mit `NO Mailbox is read-only`.
 
 ### SEARCH (RFC 3501 §6.4.4)
 
@@ -239,6 +255,44 @@ Push-Benachrichtigungen (z. B. `* <n> EXISTS` bei neu eintreffender Mail
 während des Idle) gesendet — IDLE ist hier reines Protokoll-Stubbing, kein
 funktionierendes Event-Push.
 
+### NOOP und CHECK (RFC 3501 §6.1.2, §6.4.1)
+
+```
+a NOOP
+* 3 EXPUNGE
+* 5 EXISTS
+a OK NOOP completed
+```
+
+`NOOP` ist in jedem Zustand erlaubt, `CHECK` nur mit ausgewählter Mailbox.
+Ist eine Mailbox ausgewählt, vergleichen beide den aktuellen Inhalt von
+`MAIL_DIR` mit dem Stand, den der Client zuletzt gemeldet bekam: verschwundene
+Mails (z. B. per HTTP-API oder aus einer anderen Session gelöscht) kommen als
+`* <n> EXPUNGE` (absteigend), neue Mails als `* <n> EXISTS`. Clients, die
+`NOOP` als Keepalive oder zum Pollen schicken, sehen so neue Mails.
+
+### EXPUNGE (RFC 3501 §6.4.3)
+
+```
+a EXPUNGE
+* 1 EXPUNGE
+* 2 EXPUNGE
+a OK EXPUNGE completed
+```
+
+Löscht alle Mails mit `\Deleted` samt `.flags`-Datei. Jede
+`* <n> EXPUNGE`-Antwort verschiebt die folgenden Sequenznummern sofort um
+eins (RFC 3501 §7.4.1). Werden die Mails 1, 3 und 4 von vier gelöscht, lautet
+die Folge daher `1, 2, 2`. Vorher meldet der Server wie bei `NOOP` externe
+Änderungen, damit die Nummern zum Stand des Clients passen. Ohne ausgewählte
+Mailbox kommt `BAD No mailbox selected`, nach `EXAMINE` `NO`.
+
+### CLOSE (RFC 3501 §6.4.2)
+
+Löscht wie `EXPUNGE` alle Mails mit `\Deleted`, aber ohne
+`* <n> EXPUNGE`-Antworten, und hebt die Auswahl der Mailbox auf. Nach
+`EXAMINE` wird nichts gelöscht.
+
 ### LOGOUT (RFC 3501 §6.1.3)
 
 ```
@@ -257,30 +311,26 @@ den generischen `else`-Zweig mit `<tag> BAD Unknown command` beantwortet:
 |---|---|---|
 | `STARTTLS` | RFC 3501 §6.2.1 | Mock ist nur für lokale/Test-Verbindungen gedacht, keine TLS-Terminierung nötig. |
 | `AUTHENTICATE` | RFC 3501 §6.2.2 | Login läuft ausschließlich über den einfacheren `LOGIN`-Befehl mit Klartext-Zugangsdaten; SASL-Mechanismen (`LOGIN`, `PLAIN`, `CRAM-MD5`, ...) sind nicht nötig, da es sich nicht um einen sicherheitskritischen Server handelt. Die `AUTH=LOGIN`-Angabe in `CAPABILITY` ist daher etwas irreführend, wird aber von den meisten getesteten Clients (`imaplib.login()`) ignoriert. |
-| `EXAMINE` | RFC 3501 §6.3.2 | Kein Unterschied zwischen Read-Write und Read-Only-Zustand nötig für Testzwecke. |
 | `CREATE` / `DELETE` / `RENAME` | RFC 3501 §6.3.3–6.3.5 | Es gibt nur eine feste Mailbox (`INBOX`); Mailbox-Verwaltung ist out of scope. |
 | `SUBSCRIBE` / `UNSUBSCRIBE` / `LSUB` | RFC 3501 §6.3.6/6.3.7/6.3.9 | Keine Mehrfach-Mailbox-Verwaltung vorhanden. |
 | `APPEND` | RFC 3501 §6.3.11 | Mails werden ausschließlich per SMTP eingeliefert, nicht direkt per IMAP hochgeladen. |
-| `CHECK` | RFC 3501 §6.4.1 | No-Op laut RFC, für den Mock ohne Nutzen. |
-| `CLOSE` | RFC 3501 §6.4.2 | Da `EXPUNGE` nicht implementiert ist (siehe unten), hat `CLOSE` (das implizit expunged) keinen sinnvollen Effekt. |
-| `EXPUNGE` | RFC 3501 §6.4.3 | Mit `\Deleted` markierte Nachrichten werden nie tatsächlich gelöscht — Flags werden zwar über `STORE` gesetzt, aber nichts entfernt sie aus dem Speicher. Das vereinfacht die ID-Stabilität (siehe UID-Abschnitt oben), bedeutet aber auch, dass Clients, die auf echtes Löschen testen wollen, damit nicht bedient werden. |
 | `COPY` | RFC 3501 §6.4.7 | Keine Mehrfach-Mailbox-Unterstützung, daher kein Kopierziel. |
 | `NAMESPACE` | RFC 2342 | Nur ein einziger, impliziter Namespace vorhanden. |
 | `ID` | RFC 2971 | Reine Metadaten-Extension ohne Testrelevanz. |
 
 ## Weitere Vereinfachungen
 
-- **Keine Trennung von Sequenznummer und UID:** Beide sind identisch mit der
-  fortlaufenden Datei-ID aus `storage.py`. Das ist nur korrekt, solange nie
-  expunged wird.
-- **Kommando-Parsing:** Zeilen werden mit `line.split(" ", 2)` in maximal drei
+- **Kommando-Parsing.** Zeilen werden mit `line.split(" ", 2)` in maximal drei
   Teile zerlegt (Tag, Kommando, Rest). Die IMAP-Literal-Syntax
   (`{octet-count}\r\n`) für lange oder binäre Argumente wird nirgends
   unterstützt.
-- **Kein Connection-State-Machine-Enforcement:** Es wird nur geprüft, ob
-  überhaupt eingeloggt ist (`auth`), nicht ob zuvor `SELECT` erfolgreich war.
-  `FETCH`/`STORE`/`SEARCH` funktionieren also technisch auch ohne vorheriges
-  `SELECT`.
-- **Logging:** Bei jedem `FETCH` wird `From`/`To`/`Subject` der ausgelieferten
-  Nachricht geloggt (siehe `logger.info("outgoing ...")`), nützlich um in
+- **Lockerer Selected-State.** `FETCH`/`STORE`/`SEARCH` funktionieren auch
+  ohne vorheriges `SELECT`, geprüft wird nur der Login.
+- **Sequenznummern sind nicht eingefroren.** Ein echter Server hält die
+  Nummerierung einer Session stabil, bis er Änderungen per `EXISTS`/`EXPUNGE`
+  gemeldet hat. Der Mock rechnet bei jedem Befehl mit dem aktuellen Inhalt von
+  `MAIL_DIR`. Löscht jemand per HTTP-API eine Mail, verschieben sich die Nummern
+  für den Client schon vor dem nächsten `NOOP`. UIDs sind davon nicht betroffen.
+- **Logging.** Bei jedem `FETCH`, das Header oder Body ausliefert, wird
+  `From`/`To`/`Subject` der Nachricht geloggt (siehe `logger.info("outgoing ...")`), nützlich um in
   Tests nachzuvollziehen, was ein Client tatsächlich abgeholt hat.

@@ -4,6 +4,7 @@ das Verhalten zwischen beiden Implementierungen vergleichbar bleibt.
 """
 import base64
 import os
+import re
 import socket
 import tempfile
 import threading
@@ -399,13 +400,12 @@ def _imap_login(r, w):
     assert "OK" in resp, resp
 
 
-def _imap_select(r, w, tag):
-    _write(w, f"{tag} SELECT INBOX")
-    _read(r)  # * N EXISTS (Anzahl Nachrichten)
-    _read(r)  # * FLAGS (...)
-    _read(r)  # * OK [PERMANENTFLAGS ...]
-    resp = _read(r)
-    assert "OK" in resp, resp
+def _imap_select(r, w, tag, cmd="SELECT"):
+    """Wählt INBOX aus und liefert die untagged Antworten (FLAGS, EXISTS, UIDVALIDITY, ...)."""
+    _write(w, f"{tag} {cmd} INBOX")
+    lines = _imap_read_until(r, tag)
+    assert "OK" in lines[-1], lines[-1]
+    return lines[:-1]
 
 
 def _imap_read_until(r, tag):
@@ -768,6 +768,264 @@ class IMAPTests(unittest.TestCase):
             sock.close()
 
 
+_ALTERNATIVE_MAIL = (
+    "Subject: multi\r\n"
+    "MIME-Version: 1.0\r\n"
+    'Content-Type: multipart/alternative; boundary="XX"\r\n'
+    "\r\n"
+    "--XX\r\n"
+    "Content-Type: text/plain; charset=utf-8\r\n"
+    "\r\n"
+    "plain text\r\n"
+    "--XX\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
+    "\r\n"
+    "<p>html</p>\r\n"
+    "--XX--\r\n"
+)
+
+
+class IMAPMailboxCommandTests(unittest.TestCase):
+    """NOOP, CHECK, EXAMINE, EXPUNGE, CLOSE und die SELECT-Antwortcodes."""
+
+    def test_noop_reports_new_mail(self):
+        _reset_mails()
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _read(r)
+            _write(w, "A1 NOOP")  # auch ohne Login erlaubt
+            self.assertEqual("A1 OK NOOP completed", _read(r))
+            _write(w, "A2 LOGIN testuser testpass")
+            _read(r)
+            _imap_select(r, w, "A3")
+            _write(w, "A4 NOOP")
+            self.assertEqual("A4 OK NOOP completed", _read(r))
+
+            _smtp_send_mail("<a@b>", "<c@d>", "neu")
+            _write(w, "A5 NOOP")
+            self.assertEqual(["* 1 EXISTS", "A5 OK NOOP completed"], _imap_read_until(r, "A5"))
+            _write(w, "A6 CHECK")
+            self.assertEqual("A6 OK CHECK completed", _read(r))
+        finally:
+            sock.close()
+
+    def test_noop_reports_external_delete(self):
+        _reset_mails()
+        for i in range(3):
+            _smtp_send_mail("<a@b>", "<c@d>", f"mail {i}")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            _imap_select(r, w, "A2")
+            storage.delete_mail(2)
+            _write(w, "A3 NOOP")
+            self.assertEqual(["* 2 EXPUNGE", "A3 OK NOOP completed"], _imap_read_until(r, "A3"))
+        finally:
+            sock.close()
+
+    def test_select_reports_uid_metadata(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "eins")
+        _smtp_send_mail("<a@b>", "<c@d>", "zwei")
+        storage.save_flags(1, ["\\Seen"])
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            lines = _imap_select(r, w, "A2")
+            self.assertIn("* 2 EXISTS", lines)
+            self.assertIn("* 0 RECENT", lines)
+            self.assertIn("* OK [UNSEEN 2] First unseen", lines)
+            self.assertIn(f"* OK [UIDVALIDITY {storage.uid_validity()}] UIDs valid", lines)
+            self.assertIn("* OK [UIDNEXT 3] Predicted next UID", lines)
+            self.assertTrue(any("PERMANENTFLAGS" in line and "\\*" in line for line in lines))
+        finally:
+            sock.close()
+
+    def test_uidvalidity_changes_after_reset(self):
+        _smtp_send_mail("<a@b>", "<c@d>", "x")
+        before = storage.uid_validity()
+        storage.delete_all()
+        self.assertGreater(storage.uid_validity(), before)
+
+    def test_examine_is_read_only(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "nur lesen")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            lines = _imap_select(r, w, "A2", cmd="EXAMINE")
+            self.assertIn("* OK [PERMANENTFLAGS ()] Flags permitted", lines)
+            _write(w, "A3 FETCH 1 (BODY[])")
+            _imap_read_until(r, "A3")
+            self.assertEqual([], storage.load_flags(1))
+            _write(w, r"A4 STORE 1 +FLAGS (\Deleted)")
+            self.assertEqual("A4 NO Mailbox is read-only", _read(r))
+            _write(w, "A5 EXPUNGE")
+            self.assertEqual("A5 NO Mailbox is read-only", _read(r))
+            _write(w, "A6 CLOSE")
+            self.assertEqual("A6 OK CLOSE completed", _read(r))
+            self.assertEqual([1], storage.list_ids())
+        finally:
+            sock.close()
+
+    def test_expunge_removes_deleted_mails(self):
+        _reset_mails()
+        for i in range(4):
+            _smtp_send_mail("<a@b>", "<c@d>", f"mail {i}")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            _imap_select(r, w, "A2")
+            _write(w, r"A3 STORE 1,3:4 +FLAGS.SILENT (\Deleted)")
+            _read(r)
+            _write(w, "A4 EXPUNGE")
+            # Jede EXPUNGE-Antwort verschiebt die folgenden Nummern sofort um eins.
+            self.assertEqual(
+                ["* 1 EXPUNGE", "* 2 EXPUNGE", "* 2 EXPUNGE", "A4 OK EXPUNGE completed"],
+                _imap_read_until(r, "A4"),
+            )
+            self.assertEqual([2], storage.list_ids())
+        finally:
+            sock.close()
+        # Die höchste UID war 4 und wurde gelöscht, trotzdem keine Wiederverwendung.
+        _smtp_send_mail("<a@b>", "<c@d>", "danach")
+        self.assertEqual([2, 5], storage.list_ids())
+
+    def test_close_expunges_silently_and_deselects(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "weg")
+        sock, r, w = _dial((IMAP_HOST, IMAP_PORT))
+        try:
+            _imap_login(r, w)
+            _write(w, "A2 EXPUNGE")
+            self.assertEqual("A2 BAD No mailbox selected", _read(r))
+            _imap_select(r, w, "A3")
+            _write(w, r"A4 STORE 1 +FLAGS.SILENT (\Deleted)")
+            _read(r)
+            _write(w, "A5 CLOSE")
+            self.assertEqual("A5 OK CLOSE completed", _read(r))
+            self.assertEqual([], storage.list_ids())
+            _write(w, "A6 CLOSE")
+            self.assertEqual("A6 BAD No mailbox selected", _read(r))
+        finally:
+            sock.close()
+
+    def test_imaplib_mailbox_commands(self):
+        import imaplib
+
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "eins")
+        _smtp_send_mail("<a@b>", "<c@d>", "zwei")
+        client = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+        try:
+            client.login("testuser", "testpass")
+            client.select("INBOX")
+            self.assertEqual([str(storage.uid_validity()).encode()], client.response("UIDVALIDITY")[1])
+            self.assertEqual("OK", client.noop()[0])
+            client.store("1", "+FLAGS", r"(\Deleted)")
+            typ, data = client.expunge()
+            self.assertEqual(("OK", [b"1"]), (typ, data))
+            self.assertEqual("OK", client.close()[0])
+            self.assertEqual([2], storage.list_ids())
+        finally:
+            client.logout()
+
+
+class IMAPFetchItemTests(unittest.TestCase):
+    """FETCH liefert genau die angefragten Items."""
+
+    def setUp(self):
+        _reset_mails()
+        _smtp_send_mail("<a@b>", "<c@d>", "From: a@b\r\nSubject: Hallo\r\nX-Test: 1\r\n\r\nZeile eins\r\nZeile zwei\r\n")
+        self.sock, self.r, self.w = _dial((IMAP_HOST, IMAP_PORT))
+        _imap_login(self.r, self.w)
+        _imap_select(self.r, self.w, "A2")
+
+    def tearDown(self):
+        self.sock.close()
+
+    def _fetch(self, command):
+        """Schickt ein FETCH und liefert die Antwort bis zur getaggten Zeile als Bytes."""
+        _write(self.w, command)
+        tag = command.split(" ", 1)[0].encode()
+        data = b""
+        while True:
+            line = self.r.readline()
+            data += line
+            if match := re.search(rb"\{(\d+)\}\r\n$", line):
+                data += self.r.read(int(match.group(1)))
+            elif line.startswith(tag + b" "):
+                return data
+
+    def test_flags_only(self):
+        self.assertEqual(b"* 1 FETCH (FLAGS ())\r\nA3 OK FETCH completed\r\n", self._fetch("A3 FETCH 1 (FLAGS)"))
+
+    def test_uid_fetch_always_contains_uid(self):
+        self.assertEqual(b"* 1 FETCH (UID 1 FLAGS ())\r\nA3 OK FETCH completed\r\n", self._fetch("A3 UID FETCH 1 (FLAGS)"))
+
+    def test_rfc822_size_and_internaldate(self):
+        size = len(storage.load_mail(1).encode())
+        resp = self._fetch("A3 FETCH 1 FAST")
+        self.assertRegex(
+            resp.decode(),
+            rf'^\* 1 FETCH \(FLAGS \(\) INTERNALDATE "\d\d-[A-Z][a-z]{{2}}-\d{{4}} \d\d:\d\d:\d\d \+0000" RFC822.SIZE {size}\)\r\n',
+        )
+
+    def test_body_peek_header(self):
+        header = storage.load_mail(1).encode().split(b"\r\n\r\n", 1)[0] + b"\r\n\r\n"
+        resp = self._fetch("A3 FETCH 1 (BODY.PEEK[HEADER])")
+        self.assertEqual(f"* 1 FETCH (BODY[HEADER] {{{len(header)}}}\r\n".encode() + header + b")\r\nA3 OK FETCH completed\r\n", resp)
+        self.assertEqual([], storage.load_flags(1))
+
+    def test_header_fields_and_not(self):
+        resp = self._fetch("A3 FETCH 1 (BODY.PEEK[HEADER.FIELDS (Subject x-test)])")
+        self.assertIn(b"BODY[HEADER.FIELDS (SUBJECT X-TEST)] {29}\r\nSubject: Hallo\r\nX-Test: 1\r\n\r\n)", resp)
+        resp = self._fetch("A4 FETCH 1 (BODY.PEEK[HEADER.FIELDS.NOT (SUBJECT X-TEST TO DATE)])")
+        self.assertIn(b"{13}\r\nFrom: a@b\r\n\r\n)", resp)
+
+    def test_text_and_partial(self):
+        resp = self._fetch("A3 FETCH 1 (BODY.PEEK[TEXT] BODY.PEEK[]<0.9>)")
+        self.assertIn(b"BODY[TEXT] {26}\r\nZeile eins\r\nZeile zwei\r\n\r\n", resp)
+        self.assertIn(b"BODY[]<0> {9}\r\n" + storage.load_mail(1).encode()[:9], resp)
+
+    def test_body_marks_seen_and_reports_flags(self):
+        resp = self._fetch("A3 FETCH 1 (BODY[TEXT])")
+        self.assertIn(b"FLAGS (\\Seen))\r\n", resp)
+        self.assertEqual(["\\Seen"], storage.load_flags(1))
+
+    def test_invalid_items_are_rejected(self):
+        self.assertTrue(self._fetch("A3 FETCH 1 (FLAGS BOGUS)").startswith(b"A3 BAD"))
+        self.assertTrue(self._fetch("A4 FETCH 1").startswith(b"A4 BAD"))
+        self.assertTrue(self._fetch("A5 FETCH 1 (BODY[HEADER.FIELDS])").startswith(b"A5 BAD"))
+
+    def test_bodystructure_and_parts_with_imaplib(self):
+        import imaplib
+
+        _smtp_send_mail("<a@b>", "<c@d>", _ALTERNATIVE_MAIL)
+        client = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+        try:
+            client.login("testuser", "testpass")
+            client.select("INBOX")
+            typ, data = client.fetch("2", "(BODYSTRUCTURE)")
+            self.assertEqual("OK", typ)
+            assert isinstance(data[0], bytes)
+            structure = data[0].decode()
+            self.assertIn('("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "7BIT" 10 1)', structure)
+            self.assertIn('"HTML"', structure)
+            self.assertTrue(structure.endswith(' "ALTERNATIVE"))'))
+
+            typ, data = client.fetch("2", "(BODY.PEEK[2] BODY.PEEK[1.MIME])")
+            literals = [part[1] for part in data if isinstance(part, tuple)]
+            self.assertEqual([b"<p>html</p>", b"Content-Type: text/plain; charset=utf-8\r\n\r\n"], literals)
+
+            typ, data = client.fetch("1", "(BODY.PEEK[1] RFC822.HEADER)")
+            literals = [part[1] for part in data if isinstance(part, tuple)]
+            self.assertEqual(b"Zeile eins\r\nZeile zwei\r\n\r\n", literals[0])
+            self.assertTrue(literals[1].startswith(b"From: a@b\r\n") or b"Subject: Hallo" in literals[1])
+        finally:
+            client.logout()
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -837,7 +1095,7 @@ class IMAPSequenceGapTests(unittest.TestCase):
             typ, data = client.select("INBOX")
             self.assertEqual(data, [b"2"])
 
-            typ, data = client.fetch("1:*", "(BODY.PEEK[])")
+            typ, data = client.fetch("1:*", "(UID BODY.PEEK[])")
             self.assertEqual(typ, "OK")
             parts = [part for part in data if isinstance(part, tuple)]
             self.assertEqual(len(parts), 2)
@@ -950,7 +1208,7 @@ class EnvelopeEscapingTests(unittest.TestCase):
         try:
             client.login("testuser", "testpass")
             client.select("INBOX")
-            typ, data = client.fetch("1", "(BODY.PEEK[])")
+            typ, data = client.fetch("1", "(ENVELOPE BODY.PEEK[])")
             self.assertEqual(typ, "OK")
             # Envelope-Literals für Betreff und Anzeigename, dann BODY[]-Literal.
             literals = [part[1] for part in data if isinstance(part, tuple)]
