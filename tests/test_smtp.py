@@ -148,6 +148,33 @@ class SMTPTests(unittest.TestCase):
         finally:
             sock.close()
 
+    @patch.object(smtp_server, "SMTP_AUTH_REQUIRED", False)
+    def test_optional_auth_accepts_mail_without_login(self):
+        reset_mails()
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=5) as client:
+            client.sendmail("sender@example.com", ["rcpt@example.com"], "Subject: ohne Auth\r\n\r\nHallo")
+        self.assertEqual(storage.count_mails(), 1)
+
+    @patch.object(smtp_server, "SMTP_AUTH_REQUIRED", False)
+    def test_optional_auth_still_applies_user_behavior(self):
+        reset_mails()
+        sock, r, w = dial((SMTP_HOST, SMTP_PORT))
+        try:
+            resp = smtp_auth_login(r, w, "testuser_552", "testpass_552")
+            self.assertIn("235", resp)
+            write_line(w, "MAIL FROM:<a@b>")
+            self.assertIn("250", read_line(r))
+            write_line(w, "RCPT TO:<c@d>")
+            self.assertIn("250", read_line(r))
+            write_line(w, "DATA")
+            self.assertIn("354", read_line(r))
+            write_line(w, "quota test body")
+            write_line(w, ".")
+            self.assertIn("552", read_line(r))
+            self.assertEqual(storage.count_mails(), 0)
+        finally:
+            sock.close()
+
     def test_data_without_mail_from(self):
         sock, r, w = dial((SMTP_HOST, SMTP_PORT))
         try:

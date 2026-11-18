@@ -132,10 +132,14 @@ RCPT TO:<rcpt@example.com>
 250 OK
 ```
 
-- Beide Befehle erfordern vorherige Authentifizierung
-  (`530 Authentication required`, falls nicht) — das ist eine
+- Beide Befehle (und `DATA`) erfordern im Default vorherige Authentifizierung
+  (`530 Authentication required`, falls nicht). Das ist eine
   Test-Server-Konvention, kein RFC-5321-Zwang (SMTP AUTH ist laut RFC 4954
-  grundsätzlich optional).
+  grundsätzlich optional). Mit `SMTP_AUTH_REQUIRED=false` entfällt die
+  Prüfung, und der Server nimmt Mails wie MailHog oder Mailpit auch ohne
+  `AUTH` an. `EHLO` kündigt `AUTH LOGIN PLAIN` trotzdem an. Meldet sich ein
+  Client an, gilt weiter das `behavior` aus `users.json`; ein fehlgeschlagenes
+  `AUTH` (`535`) blockiert die anschließende Transaktion nicht.
 - Der komplette Rest der Zeile nach `MAIL FROM:`/`RCPT TO:` wird
   **unverarbeitet als String übernommen** — keine Prüfung auf
   spitze Klammern (`<...>`), keine Adress-Syntaxvalidierung, keine

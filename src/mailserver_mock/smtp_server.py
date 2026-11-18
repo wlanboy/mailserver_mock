@@ -14,6 +14,9 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "1025"))
 SMTP_TIMEOUT = connection.env_timeout("SMTP_TIMEOUT", "300")
 # Größte angenommene Mail in Bytes (nach Dot-Unstuffing), wird per SIZE angekündigt.
 SMTP_MAX_MESSAGE_SIZE = int(os.environ.get("SMTP_MAX_MESSAGE_SIZE", str(10 * 1024 * 1024)))
+# Mit false nimmt der Server MAIL/RCPT/DATA auch ohne AUTH an (wie MailHog/Mailpit).
+# AUTH bleibt angekündigt und funktioniert weiter, inklusive Test-Verhalten aus users.json.
+SMTP_AUTH_REQUIRED = os.environ.get("SMTP_AUTH_REQUIRED", "true").strip().lower() not in ("false", "0", "no", "off")
 
 # DATA wird in Stücken dieser Größe gelesen, damit überlange Zeilen nicht
 # komplett im Speicher landen, bevor die Größenprüfung greift.
@@ -259,7 +262,7 @@ class SMTPHandler(socketserver.StreamRequestHandler):
                     return
 
             elif upper.startswith("MAIL FROM:"):
-                if not auth:
+                if SMTP_AUTH_REQUIRED and not auth:
                     self._write("530 Authentication required")
                     continue
                 address, size = _parse_mail_from(cmd[len("MAIL FROM:"):])
@@ -271,14 +274,14 @@ class SMTPHandler(socketserver.StreamRequestHandler):
                 self._write("250 OK")
 
             elif upper.startswith("RCPT TO:"):
-                if not auth:
+                if SMTP_AUTH_REQUIRED and not auth:
                     self._write("530 Authentication required")
                     continue
                 rcpt_to.append(cmd[len("RCPT TO:"):])
                 self._write("250 OK")
 
             elif upper == "DATA":
-                if not auth:
+                if SMTP_AUTH_REQUIRED and not auth:
                     self._write("530 Authentication required")
                     continue
                 if mail_from == "":
