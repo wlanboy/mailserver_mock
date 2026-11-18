@@ -17,7 +17,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from email import message_from_string, policy
+from email import message_from_bytes, policy
 from email.utils import getaddresses
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -135,7 +135,7 @@ def _summary(msg_id, raw, msg, text):
         "subject": _header(msg, "Subject") or "",
         "date": _header(msg, "Date"),
         "received": _received_at(msg_id),
-        "size": len(raw.encode("utf-8")),
+        "size": len(raw),
         "flags": flags,
         "seen": "\\Seen" in flags,
         "snippet": snippet,
@@ -147,7 +147,7 @@ def _load(msg_id):
     if not storage.mail_path(msg_id).exists():
         return None
     raw = storage.load_mail(msg_id)
-    return raw, message_from_string(raw, policy=policy.default)
+    return raw, message_from_bytes(raw, policy=policy.default)
 
 
 def mail_summary(msg_id):
@@ -266,7 +266,7 @@ class HTTPHandler(BaseHTTPRequestHandler):
             if m.group(2):
                 if not storage.mail_path(msg_id).exists():
                     return self._error(HTTPStatus.NOT_FOUND, f"mail {msg_id} not found")
-                raw = storage.load_mail(msg_id).encode("utf-8")
+                raw = storage.load_mail(msg_id)
                 return self._send(HTTPStatus.OK, raw, "message/rfc822", {
                     "Content-Disposition": f'attachment; filename="{msg_id}.eml"',
                 })

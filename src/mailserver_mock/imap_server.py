@@ -107,10 +107,10 @@ def _tokenize_search(args):
 
 
 def _search_text_matches(msg_id, key, needle):
-    raw = storage.load_mail(msg_id)
-    msg = message_from_string(raw)
+    text = storage.load_mail(msg_id).decode("utf-8", errors="replace")
+    msg = message_from_string(text)
     if key == "TEXT":
-        haystack = raw
+        haystack = text
     elif key == "BODY":
         haystack = str(msg.get_payload() or "")
     else:
@@ -121,6 +121,15 @@ def _search_text_matches(msg_id, key, needle):
 _SYSTEM_FLAGS = "\\Answered \\Flagged \\Deleted \\Seen \\Draft"
 _READ_WRITE = "READ-WRITE"
 _READ_ONLY = "READ-ONLY"
+
+# Mindestzustand für ein Kommando (RFC 3501 §3): jederzeit, nach LOGIN oder
+# nach SELECT/EXAMINE. Die Prüfung macht handle() vor dem Aufruf des Handlers.
+_ANY = "any"
+_AUTH = "authenticated"
+_SELECTED = "selected"
+
+# Rückgabewert eines Handlers, der die Verbindung beenden will (LOGOUT).
+_CLOSE = object()
 
 
 class IMAPHandler(socketserver.StreamRequestHandler):
@@ -184,99 +193,68 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             cmd = parts[1].upper()
             args = parts[2] if len(parts) == 3 else ""
 
-            if cmd == "CAPABILITY":
-                self._write("* CAPABILITY IMAP4rev1 AUTH=LOGIN")
-                self._write(f"{tag} OK CAPABILITY completed")
-
-            elif cmd == "LOGIN":
-                try:
-                    a = shlex.split(args)
-                except ValueError:
-                    a = []
-                if len(a) != 2:
-                    self._write(f"{tag} BAD LOGIN syntax")
-                    continue
-                self._handle_login(tag, a[0], a[1])
-
-            elif cmd == "LIST":
-                self._write('* LIST (\\HasNoChildren) "/" "INBOX"')
-                self._write(f"{tag} OK LIST completed")
-
-            elif cmd in ("SELECT", "EXAMINE"):
-                if not self.auth:
-                    self._write(f"{tag} NO Authenticate first")
-                    continue
-                self._handle_select(tag, cmd)
-
-            elif cmd == "NOOP":
-                self._report_changes()
-                self._write(f"{tag} OK NOOP completed")
-
-            elif cmd in ("CHECK", "CLOSE", "EXPUNGE"):
-                if not self.auth:
-                    self._write(f"{tag} NO Authenticate first")
-                    continue
-                if self.selected is None:
-                    self._write(f"{tag} BAD No mailbox selected")
-                    continue
-                if cmd == "CHECK":
-                    self._report_changes()
-                    self._write(f"{tag} OK CHECK completed")
-                elif cmd == "CLOSE":
-                    if self.selected == _READ_WRITE:
-                        self._expunge_deleted()  # CLOSE löscht ohne EXPUNGE-Antworten
-                    self.selected = None
-                    self.known_uids = []
-                    self._write(f"{tag} OK CLOSE completed")
-                else:
-                    self._handle_expunge(tag)
-
-            elif cmd == "STATUS":
-                if not self.auth:
-                    self._write(f"{tag} NO Authenticate first")
-                    continue
-                self._handle_status(tag, args)
-
-            elif cmd == "UID":
-                if not self.auth:
-                    self._write(f"{tag} NO Authenticate first")
-                    continue
-                self._handle_uid(tag, args)
-
-            elif cmd == "FETCH":
-                if not self.auth:
-                    self._write(f"{tag} NO Authenticate first")
-                    continue
-                self._handle_fetch(tag, args)
-
-            elif cmd == "STORE":
-                if not self.auth:
-                    self._write(f"{tag} NO Authenticate first")
-                    continue
-                self._handle_store(tag, args)
-
-            elif cmd == "SEARCH":
-                if not self.auth:
-                    self._write(f"{tag} NO Authenticate first")
-                    continue
-                self._handle_search(tag, args)
-
-            elif cmd == "IDLE":
-                if not self.auth:
-                    self._write(f"{tag} NO Authenticate first")
-                    continue
-                self._write("+ idling")
-                self._read()  # liest das "DONE" des Clients
-                self._write(f"{tag} OK IDLE terminated")
-
-            elif cmd == "LOGOUT":
-                self._write("* BYE IMAP server logging out")
-                self._write(f"{tag} OK LOGOUT completed")
-                return
-
-            else:
+            entry = _COMMANDS.get(cmd)
+            if entry is None:
                 logger.warning("unhandled command cmd=%s args=%r", cmd, args)
                 self._write(f"{tag} BAD Unknown command")
+                continue
+            handler, state = entry
+            if state != _ANY and not self.auth:
+                self._write(f"{tag} NO Authenticate first")
+                continue
+            if state == _SELECTED and self.selected is None:
+                self._write(f"{tag} BAD No mailbox selected")
+                continue
+            if handler(self, tag, cmd, args) is _CLOSE:
+                return
+
+    # --- Kommandos ohne eigene Logik -----------------------------------------
+    # Alle Handler haben die Signatur (tag, cmd, args), siehe _COMMANDS.
+
+    def _cmd_capability(self, tag, cmd, args):
+        self._write("* CAPABILITY IMAP4rev1 AUTH=LOGIN")
+        self._write(f"{tag} OK CAPABILITY completed")
+
+    def _cmd_login(self, tag, cmd, args):
+        try:
+            a = shlex.split(args)
+        except ValueError:
+            a = []
+        if len(a) != 2:
+            self._write(f"{tag} BAD LOGIN syntax")
+            return
+        self._handle_login(tag, a[0], a[1])
+
+    def _cmd_list(self, tag, cmd, args):
+        self._write('* LIST (\\HasNoChildren) "/" "INBOX"')
+        self._write(f"{tag} OK LIST completed")
+
+    def _cmd_noop(self, tag, cmd, args):
+        self._report_changes()
+        self._write(f"{tag} OK NOOP completed")
+
+    def _cmd_check(self, tag, cmd, args):
+        self._report_changes()
+        self._write(f"{tag} OK CHECK completed")
+
+    def _cmd_close(self, tag, cmd, args):
+        if self.selected == _READ_WRITE:
+            self._expunge_deleted()  # CLOSE löscht ohne EXPUNGE-Antworten
+        self.selected = None
+        self.known_uids = []
+        self._write(f"{tag} OK CLOSE completed")
+
+    def _cmd_idle(self, tag, cmd, args):
+        self._write("+ idling")
+        self._read()  # liest das "DONE" des Clients
+        self._write(f"{tag} OK IDLE terminated")
+
+    def _cmd_logout(self, tag, cmd, args):
+        self._write("* BYE IMAP server logging out")
+        self._write(f"{tag} OK LOGOUT completed")
+        return _CLOSE
+
+    # --- Kommandos mit eigener Logik -----------------------------------------
 
     def _handle_login(self, tag, username, password):
         account = users.find_user(username)
@@ -452,12 +430,13 @@ class IMAPHandler(socketserver.StreamRequestHandler):
             self.wfile.write(imap_fetch.render(seq, message, flags, items, include_uid=is_uid, include_flags=flags_changed))
 
             if log_content:
+                headers = storage.parse_lenient(message.raw)
                 logger.info(
                     "outgoing id=%s from=%s to=%s subject=%r",
                     msg_id,
-                    message.parsed.get("From", "NIL"),
-                    message.parsed.get("To", "NIL"),
-                    message.parsed.get("Subject", ""),
+                    headers.get("From", "NIL"),
+                    headers.get("To", "NIL"),
+                    headers.get("Subject", ""),
                 )
         self.wfile.flush()
 
@@ -558,6 +537,26 @@ class IMAPHandler(socketserver.StreamRequestHandler):
 
         self._write("* SEARCH " + " ".join(str(uid if is_uid else seq) for seq, uid in ids))
         self._write(f"{tag} OK SEARCH completed")
+
+
+_COMMANDS = {
+    "CAPABILITY": (IMAPHandler._cmd_capability, _ANY),
+    "LOGIN": (IMAPHandler._cmd_login, _ANY),
+    "LIST": (IMAPHandler._cmd_list, _ANY),
+    "NOOP": (IMAPHandler._cmd_noop, _ANY),
+    "LOGOUT": (IMAPHandler._cmd_logout, _ANY),
+    "SELECT": (lambda h, tag, cmd, args: h._handle_select(tag, cmd), _AUTH),
+    "EXAMINE": (lambda h, tag, cmd, args: h._handle_select(tag, cmd), _AUTH),
+    "STATUS": (lambda h, tag, cmd, args: h._handle_status(tag, args), _AUTH),
+    "UID": (lambda h, tag, cmd, args: h._handle_uid(tag, args), _AUTH),
+    "FETCH": (lambda h, tag, cmd, args: h._handle_fetch(tag, args), _AUTH),
+    "STORE": (lambda h, tag, cmd, args: h._handle_store(tag, args), _AUTH),
+    "SEARCH": (lambda h, tag, cmd, args: h._handle_search(tag, args), _AUTH),
+    "IDLE": (IMAPHandler._cmd_idle, _AUTH),
+    "CHECK": (IMAPHandler._cmd_check, _SELECTED),
+    "CLOSE": (IMAPHandler._cmd_close, _SELECTED),
+    "EXPUNGE": (lambda h, tag, cmd, args: h._handle_expunge(tag), _SELECTED),
+}
 
 
 class IMAPServer(socketserver.ThreadingTCPServer):

@@ -1,6 +1,7 @@
 """Dateibasierte Mail-Speicherung.
 
-Jede angenommene Mail wird als ``<id>.eml`` (rohe RFC-5322-Nachricht) plus
+Jede angenommene Mail wird als ``<id>.eml`` (rohe RFC-5322-Nachricht, Byte für
+Byte wie vom Client gesendet, nur ergänzt um fehlende Pflicht-Header) plus
 einer zugehörigen ``<id>.flags``-Datei (durch Leerzeichen getrennte IMAP-Flags)
 in MAIL_DIR geschrieben. IDs sind fortlaufende Ganzzahlen ab 1 und spiegeln
 damit das Dateiformat des gosmtp-Referenzservers, sodass Tooling für den einen
@@ -11,7 +12,7 @@ import re
 import threading
 import time
 from email import message_from_string
-from email.parser import HeaderParser
+from email.parser import BytesHeaderParser
 from email.utils import formatdate, getaddresses
 from pathlib import Path
 
@@ -49,8 +50,8 @@ def _flags_path(msg_id):
 def _is_header_field(line):
     """Prüft auf "Name: Wert" mit einem Feldnamen nach RFC 5322 §3.6.8
     (druckbares ASCII ohne Leerzeichen und ohne Doppelpunkt)."""
-    name, sep, _ = line.partition(":")
-    return bool(sep) and bool(name) and all(33 <= ord(c) <= 126 for c in name)
+    name, sep, _ = line.partition(b":")
+    return bool(sep) and bool(name) and all(33 <= c <= 126 for c in name)
 
 
 def _split_headers(raw):
@@ -61,11 +62,11 @@ def _split_headers(raw):
     vergessen). Der Body ist ``None``, wenn die Nachricht nur aus Headern
     besteht. Fehlt der Header-Block ganz, ist die Header-Liste leer.
     """
-    lines = raw.replace("\r\n", "\n").split("\n")
+    lines = raw.replace(b"\r\n", b"\n").split(b"\n")
     for idx, line in enumerate(lines):
-        if line.strip() == "":
+        if line.strip() == b"":
             return lines[:idx], lines[idx + 1 :]
-        if idx > 0 and line[0] in " \t":
+        if idx > 0 and line[:1] in (b" ", b"\t"):
             continue  # gefaltete Header-Zeile (RFC 5322 §2.2.3)
         if _is_header_field(line):
             continue
@@ -130,13 +131,17 @@ def count_mails():
 
 
 def save_mail(from_addr, to_addrs, raw):
-    """Speichert einen rohen DATA-Payload und ergänzt fehlende Header.
+    """Speichert einen rohen DATA-Payload (``bytes``) und ergänzt fehlende Header.
 
     Fehlen From, To, Subject oder Date im Header-Block, werden sie einzeln
     vorangestellt. Vorhandene Header bleiben unverändert, der Body ebenso.
+    Die Bytes werden nicht dekodiert, damit 8-Bit-Mails in beliebigem Charset
+    (z. B. ISO-8859-1) unverändert bleiben. ``str`` wird als UTF-8 kodiert.
     """
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
     header_lines, body_lines = _split_headers(raw)
-    present = HeaderParser().parsestr("\n".join(header_lines) + "\n\n")
+    present = BytesHeaderParser().parsebytes(b"\n".join(header_lines) + b"\n\n")
 
     # next_id() (Verzeichnis-Scan) und das Anlegen der Datei müssen atomar
     # zusammen ablaufen, sonst können zwei parallele Sessions (Threading-
@@ -150,14 +155,12 @@ def save_mail(from_addr, to_addrs, raw):
             ("Subject", f"Mock Mail {msg_id}"),
             ("Date", formatdate(localtime=False)),
         )
-        generated = [f"{name}: {value}" for name, value in defaults if name not in present]
+        generated = [f"{name}: {value}".encode("utf-8") for name, value in defaults if name not in present]
         lines = generated + header_lines
         if body_lines is not None:
-            lines += [""] + body_lines
-        content = "\r\n".join(lines)
+            lines += [b""] + body_lines
 
-        with open(_eml_path(msg_id), "w", encoding="utf-8", newline="") as f:
-            f.write(content)
+        _eml_path(msg_id).write_bytes(b"\r\n".join(lines))
         _flags_path(msg_id).write_text("", encoding="utf-8")
         (MAIL_DIR / _UIDNEXT_FILE).write_text(str(msg_id + 1), encoding="utf-8")
         return msg_id
@@ -175,11 +178,20 @@ def save_flags(msg_id, flags):
 
 
 def load_mail(msg_id):
-    p = _eml_path(msg_id)
-    if not p.exists():
-        return ""
-    with open(p, "r", encoding="utf-8", newline="") as f:
-        return f.read()
+    """Rohe Nachricht als ``bytes``, ``b""`` wenn sie nicht existiert."""
+    try:
+        return _eml_path(msg_id).read_bytes()
+    except FileNotFoundError:
+        return b""
+
+
+def parse_lenient(raw):
+    """Parst eine Nachricht für Logging und Textsuche.
+
+    Ungültiges UTF-8 wird durch U+FFFD ersetzt. Für die Auslieferung an
+    Clients ist das ungeeignet, dafür gibt es die Rohbytes aus ``load_mail``.
+    """
+    return message_from_string(raw.decode("utf-8", errors="replace"))
 
 
 def mail_path(msg_id):
@@ -221,6 +233,10 @@ def imap_string(value):
 
     Reines ASCII ohne CR/LF wird als quoted string mit escaptem \\ und "
     gesendet, alles andere (z. B. unkodierte Umlaute) als Literal {n}.
+
+    Werte aus ``get_envelope`` enthalten Nicht-UTF-8-Bytes als Surrogates
+    (surrogateescape). Die Länge des Literals zählt daher die Originalbytes,
+    der Aufrufer muss das Ergebnis mit ``encode_response`` kodieren.
     """
     if value is None:
         return "NIL"
@@ -230,12 +246,30 @@ def imap_string(value):
     if value.isascii():
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
-    data = value.encode("utf-8")
-    return f"{{{len(data)}}}\r\n{value}"
+    return f"{{{len(encode_response(value))}}}\r\n{value}"
+
+
+def encode_response(text):
+    """Kodiert eine IMAP-Antwort, Surrogates werden wieder zu den Originalbytes."""
+    return text.encode("utf-8", errors="surrogateescape")
+
+
+def _raw_header_values(msg, name):
+    """Header-Werte ohne die Bereinigung von compat32.
+
+    ``Message.get`` ersetzt Nicht-ASCII-Bytes durch U+FFFD. ``raw_items``
+    liefert die gespeicherten Werte mit Surrogates für die Originalbytes.
+    """
+    return [v for k, v in msg.raw_items() if k.lower() == name.lower()]
+
+
+def _first_header(msg, name):
+    values = _raw_header_values(msg, name)
+    return values[0] if values else None
 
 
 def _format_addr_list(msg, header_name):
-    raw_headers = msg.get_all(header_name)
+    raw_headers = _raw_header_values(msg, header_name)
     if not raw_headers:
         return "NIL"
     addrs = getaddresses(raw_headers)
@@ -253,14 +287,18 @@ def _format_addr_list(msg, header_name):
 
 
 def get_envelope(raw):
-    """Baut eine IMAP-ENVELOPE-Struktur für eine gespeicherte Nachricht."""
+    """Baut eine IMAP-ENVELOPE-Struktur aus den Rohbytes einer Nachricht.
+
+    Header-Werte gehen byte-genau in die Antwort, auch wenn sie unkodierte
+    Zeichen in einem anderen Charset als UTF-8 enthalten.
+    """
     if not raw.strip():
         return '(NIL "Format Error: Missing Blank Line" NIL NIL NIL NIL NIL NIL NIL NIL)'
 
-    msg = message_from_string(raw)
+    msg = message_from_string(raw.decode("utf-8", errors="surrogateescape"))
 
-    date = msg.get("Date") or formatdate(localtime=False)
-    subject = msg.get("Subject") or "No Subject"
+    date = _first_header(msg, "Date") or formatdate(localtime=False)
+    subject = _first_header(msg, "Subject") or "No Subject"
     from_ = _format_addr_list(msg, "From")
     reply_to = _format_addr_list(msg, "Reply-To")
     to = _format_addr_list(msg, "To")

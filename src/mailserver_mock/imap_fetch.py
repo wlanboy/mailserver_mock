@@ -159,7 +159,7 @@ class StoredMessage:
     @property
     def raw(self):
         if self._raw is None:
-            self._raw = storage.load_mail(self.msg_id).encode("utf-8")
+            self._raw = storage.load_mail(self.msg_id)
         return self._raw
 
     @property
@@ -297,7 +297,7 @@ def _body_structure(part, raw=None):
         inner = part.get_payload()
         if isinstance(inner, list) and inner:
             inner_raw = _part_bytes(inner[0])
-            envelope = storage.get_envelope(inner_raw.decode("utf-8", errors="replace"))
+            envelope = storage.get_envelope(inner_raw)
             fields += f" {envelope} {_body_structure(inner[0], inner_raw)} {lines}"
     return f"({fields})"
 
@@ -321,9 +321,9 @@ def _render_item(item, message, flags):
     if item.name == "RFC822.SIZE":
         return f"RFC822.SIZE {len(message.raw)}".encode()
     if item.name == "ENVELOPE":
-        return f"ENVELOPE {storage.get_envelope(message.raw.decode('utf-8', errors='replace'))}".encode("utf-8")
+        return storage.encode_response(f"ENVELOPE {storage.get_envelope(message.raw)}")
     if item.name in ("BODY", "BODYSTRUCTURE"):
-        return f"{item.name} {_body_structure(message.parsed, message.raw)}".encode("utf-8")
+        return storage.encode_response(f"{item.name} {_body_structure(message.parsed, message.raw)}")
     if item.name == "RFC822":
         return _literal("RFC822", message.raw)
     if item.name == "RFC822.HEADER":

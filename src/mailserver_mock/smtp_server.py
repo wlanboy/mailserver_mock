@@ -5,7 +5,6 @@ import logging
 import os
 import socketserver
 import time
-from email import message_from_string
 
 from . import storage, users
 
@@ -33,11 +32,12 @@ class SMTPHandler(socketserver.StreamRequestHandler):
     def _write(self, msg):
         self.wfile.write((msg + "\r\n").encode("utf-8"))
 
+    def _read_raw(self):
+        return self.rfile.readline() or None
+
     def _read(self):
-        line = self.rfile.readline()
-        if not line:
-            return None
-        return line.decode("utf-8", errors="replace")
+        line = self._read_raw()
+        return None if line is None else line.decode("utf-8", errors="replace")
 
     def _login(self, username, password):
         """Prüft Zugangsdaten gegen users.json und wendet Test-Fehlerverhalten an.
@@ -77,25 +77,25 @@ class SMTPHandler(socketserver.StreamRequestHandler):
         data_lines = []
 
         while True:
-            line = self._read()
-            if line is None:
+            raw_line = self._read_raw()
+            if raw_line is None:
                 return
             if data_mode:
-                # Im DATA-Modus die Rohzeile verarbeiten: nur das Zeilenende abschneiden,
-                # Leerzeilen, Einrückungen und Leerzeichen am Zeilenende bleiben erhalten.
-                if line.endswith("\r\n"):
-                    data_line = line[:-2]
-                elif line.endswith("\n"):
-                    data_line = line[:-1]
+                # Im DATA-Modus die Rohbytes verarbeiten: nur das Zeilenende abschneiden.
+                # Leerzeilen, Einrückungen, Leerzeichen am Zeilenende und 8-Bit-Zeichen
+                # in beliebigem Charset bleiben erhalten.
+                if raw_line.endswith(b"\r\n"):
+                    data_line = raw_line[:-2]
+                elif raw_line.endswith(b"\n"):
+                    data_line = raw_line[:-1]
                 else:
-                    data_line = line
-                if data_line == ".":
+                    data_line = raw_line
+                if data_line == b".":
                     if quota_error:
                         self._write(_format_error(quota_error, "552", "5.2.2", "Mailbox full, quota exceeded"))
                     else:
-                        msg_id = storage.save_mail(mail_from, rcpt_to, "".join(data_lines))
-                        raw = storage.load_mail(msg_id)
-                        headers = message_from_string(raw)
+                        msg_id = storage.save_mail(mail_from, rcpt_to, b"".join(data_lines))
+                        headers = storage.parse_lenient(storage.load_mail(msg_id))
                         logger.info(
                             "incoming id=%s from=%s to=%s subject=%r",
                             msg_id,
@@ -110,11 +110,11 @@ class SMTPHandler(socketserver.StreamRequestHandler):
                     rcpt_to = []
                 else:
                     # RFC 5321 Dot-Stuffing: hebt das führende-Punkt-Escaping des Clients wieder auf.
-                    unstuffed = data_line[1:] if data_line.startswith(".") else data_line
-                    data_lines.append(unstuffed + "\r\n")
+                    unstuffed = data_line[1:] if data_line.startswith(b".") else data_line
+                    data_lines.append(unstuffed + b"\r\n")
                 continue
 
-            cmd = line.strip()
+            cmd = raw_line.decode("utf-8", errors="replace").strip()
             if cmd == "":
                 continue
             upper = cmd.upper()
