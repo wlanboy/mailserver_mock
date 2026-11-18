@@ -27,12 +27,12 @@ pvc:
   size: "256Mi"
 
 volume:
-  mountPath: /app/mails
+  mountPath: /app/data/mails
 
 env:
-  mailDir: /app/mails
+  mailDir: /app/data/mails
   # Nur relevant bei users.configMap.enabled=false (dann die ins Image gebackene Datei)
-  usersFile: /app/users.json
+  usersFile: /app/data/config/users.json
 
 resources:
   requests:
@@ -66,7 +66,7 @@ users:
   configMap:
     enabled: true
     name: mailserver-mock-users
-  mountPath: /app/config
+  mountPath: /app/data/config
   # Optional: Roh-JSON, hat Vorrang vor users.config, z. B.
   #   helm upgrade ... --set-file users.json=users.json
   json: ""

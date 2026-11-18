@@ -12,9 +12,11 @@ RUN python -m venv --without-pip /opt/venv && \
 # Nur das Paket kopieren (ohne *.md aus src/) und Bytecode vorab erzeugen.
 # unchecked-hash: unabhängig von mtimes, zur Laufzeit wird nichts geschrieben (read-only FS).
 COPY src/mailserver_mock/ /app/src/mailserver_mock/
-COPY main.py users.json /app/
+COPY main.py /app/
+COPY users.json /app/data/config/users.json
 RUN python -m compileall -q --invalidation-mode unchecked-hash /app/src /app/main.py && \
-    install -d -o 1000 -g 1000 -m 0750 /app/mails
+    install -d -o 1000 -g 1000 -m 0750 /app/data/mails && \
+    chown 1000:1000 /app/data/config /app/data/config/users.json
 
 FROM python:${PYTHON_TAG}
 ARG REVISION=unknown
@@ -33,19 +35,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \
     SMTP_HOST=0.0.0.0 \
     SMTP_PORT=1025 \
+    SMTP_TIMEOUT=300 \
+    SMTP_MAX_MESSAGE_SIZE=10485760 \
+    SMTP_AUTH_REQUIRED=true \
     IMAP_HOST=0.0.0.0 \
     IMAP_PORT=1143 \
+    IMAP_TIMEOUT=1800 \
     HTTP_HOST=0.0.0.0 \
     HTTP_PORT=8025 \
-    MAIL_DIR=/app/mails \
-    USERS_FILE=/app/users.json
+    MAIL_DIR=/app/data/mails \
+    USERS_FILE=/app/data/config/users.json
 
 RUN groupadd -r -g 1000 appuser && useradd -r -u 1000 -g appuser -M -s /usr/sbin/nologin appuser
 
 WORKDIR /app
 
-# venv und Code gehören root, der Benutzer darf nur in /app/mails schreiben
-# (COPY --from übernimmt die Besitzer aus dem Build-Stage, also UID 1000 für /app/mails)
+# venv und Code gehören root, der Benutzer darf nur unter /app/data schreiben
+# (COPY --from übernimmt die Besitzer aus dem Build-Stage, also UID 1000 für mails/ und config/)
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build /app /app
 
@@ -56,5 +62,9 @@ EXPOSE 1025 1143 8025
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen(f\"http://127.0.0.1:{os.environ['HTTP_PORT']}/health\", timeout=2)"]
 
-# /app/mails als Volume mounten, um die .eml-Testmails zu behalten
+# /app/data enthält mails/ (MAIL_DIR, die .eml-Testmails) und config/users.json (USERS_FILE).
+# Ein leeres Named Volume übernimmt beim ersten Start beide Unterordner samt users.json aus dem Image.
+# Bei einem Bind-Mount muss config/users.json selbst angelegt werden, sonst gilt nur MAIL_USER/MAIL_PASS.
+VOLUME ["/app/data"]
+
 CMD ["python", "main.py"]

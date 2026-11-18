@@ -16,8 +16,8 @@ HTTP-API samt Web-UI über eine normale **HTTP-Route** auf Port 80 für `ingress
 ## Komponenten
 
 - **Deployment** (`templates/deployment.yaml`) – genau 1 Replica des Containers `registry.gmk.lan/mailserver` mit Update-Strategie `Recreate` (RWO-PVC, ID-Vergabe nur prozessintern gesperrt), mit Startup-, Liveness- und Readiness-Probes per `httpGet` auf `/health`. Der Endpoint liefert nur `200`, wenn SMTP- und IMAP-Listener laufen und das Mail-Verzeichnis beschreibbar ist, und ist damit aussagekräftiger als ein reiner TCP-Check. Läuft als UID/GID 1000 mit read-only Root-Filesystem, ohne Capabilities und mit `resources`-Requests/-Limits; `/tmp` ist ein kleines `emptyDir`.
-- **ConfigMap** (`templates/configmap-users.yaml`, nur bei `users.configMap.enabled: true`) – enthält die `users.json` mit Test-Usern und Fehlerszenarien, gemountet unter `/app/config/users.json`.
-- **PersistentVolumeClaim** (`templates/pvc.yaml`, nur bei `pvc.enabled: true`) – wird als `/app/mails`-Volume gemountet, persistiert die als `.eml` abgelegten Test-Mails über Pod-Neustarts hinweg.
+- **ConfigMap** (`templates/configmap-users.yaml`, nur bei `users.configMap.enabled: true`) – enthält die `users.json` mit Test-Usern und Fehlerszenarien, gemountet unter `/app/data/config/users.json`.
+- **PersistentVolumeClaim** (`templates/pvc.yaml`, nur bei `pvc.enabled: true`) – wird als `/app/data/mails`-Volume gemountet, persistiert die als `.eml` abgelegten Test-Mails über Pod-Neustarts hinweg.
 - **Service** (`templates/service.yaml`) – ClusterIP-Service mit den Ports `smtp` (1025), `imap` (1143) und `http` (8025).
 - **Gateway** (`templates/gateway.yaml`) – Istio `Gateway` mit zwei `protocol: TCP`-Server-Blöcken (SMTP/IMAP-Port), `hosts: ["*"]`, da bei reinem TCP (ohne TLS-Passthrough) keine SNI-basierte Host-Unterscheidung möglich ist.
   Bei `istio.http.enabled: true` kommt ein dritter Server-Block `protocol: HTTP` auf `istio.http.port` (80) mit `hosts: ingress.hosts` hinzu.
@@ -39,16 +39,16 @@ Zielcluster vorhanden sind – ein `helm install`/`helm template` schlägt also 
 | `service.smtp.port` / `service.smtp.targetPort` | SMTP Service- und Container-Port | `1025` |
 | `service.imap.port` / `service.imap.targetPort` | IMAP Service- und Container-Port | `1143` |
 | `service.http.port` / `service.http.targetPort` | HTTP-API/Web-UI Service- und Container-Port | `8025` |
-| `pvc.enabled` | PVC für `/app/mails` anlegen | `true` |
+| `pvc.enabled` | PVC für `/app/data/mails` anlegen | `true` |
 | `pvc.name` / `pvc.accessModes` / `pvc.storageClassName` / `pvc.size` | PVC-Einstellungen | `mailserver-mock-mails-pvc`, `[ReadWriteOnce]`, `""`, `256Mi` |
-| `volume.mountPath` | Mountpfad des Mail-Volumes im Container | `/app/mails` |
-| `env.mailDir` | `MAIL_DIR` im Container | `/app/mails` |
-| `env.usersFile` | `USERS_FILE` im Container, nur bei `users.configMap.enabled: false` (Datei aus dem Image) | `/app/users.json` |
+| `volume.mountPath` | Mountpfad des Mail-Volumes im Container | `/app/data/mails` |
+| `env.mailDir` | `MAIL_DIR` im Container | `/app/data/mails` |
+| `env.usersFile` | `USERS_FILE` im Container, nur bei `users.configMap.enabled: false` (Datei aus dem Image) | `/app/data/config/users.json` |
 | `resources` | CPU/Memory-Requests und -Limits | `50m`/`64Mi` Request, `250m`/`128Mi` Limit |
 | `podSecurityContext` | Pod-`securityContext` (`fsGroup` für Schreibrechte auf dem PVC, Seccomp) | `fsGroup: 1000`, `RuntimeDefault` |
 | `securityContext` | Container-`securityContext` | `runAsNonRoot`, UID/GID `1000`, `readOnlyRootFilesystem`, `drop: [ALL]` |
 | `users.configMap.enabled` / `users.configMap.name` | `users.json` als ConfigMap statt aus dem Image | `true`, `mailserver-mock-users` |
-| `users.mountPath` | Mount-Verzeichnis der ConfigMap, `USERS_FILE` wird auf `<mountPath>/users.json` gesetzt | `/app/config` |
+| `users.mountPath` | Mount-Verzeichnis der ConfigMap, `USERS_FILE` wird auf `<mountPath>/users.json` gesetzt | `/app/data/config` |
 | `users.config` | User-Liste als YAML, wird zu JSON gerendert | Inhalt von `users.json` im Repo-Root |
 | `users.json` | Roh-JSON, hat Vorrang vor `users.config` (für `--set-file`) | `""` |
 | `ingress.hosts` | Hostnamen für die HTTP-Route (Web-UI/API); für SMTP/IMAP nur informativ, siehe Hinweise | `mailmock.gmk.lan` |
@@ -105,7 +105,7 @@ helm uninstall mailserver-mock -n mailmock
 ```
 
 > Der PVC (`pvc.name`) wird von Helm mit deinstalliert, da er Teil der gerenderten Ressourcen des
-> Release ist. Test-Mails in `/app/mails` gehen dabei verloren – für einen reinen Mock in der Regel
+> Release ist. Test-Mails in `/app/data/mails` gehen dabei verloren – für einen reinen Mock in der Regel
 > unkritisch.
 
 ## Hinweise
