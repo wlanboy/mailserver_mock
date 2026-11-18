@@ -63,6 +63,15 @@ def _header(msg, name):
     return None if value is None else str(value)
 
 
+def _undecodable_to_replacement(value):
+    """Ersetzt Nicht-UTF-8-Bytes durch U+FFFD.
+
+    ``raw_items`` liefert unkodierte 8-Bit-Header (z. B. ISO-8859-1) mit
+    Surrogates, die ``json.dumps(...).encode()`` nicht kodieren kann.
+    """
+    return value.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+
+
 def _addresses(msg, name):
     try:
         values = msg.get_all(name) or []
@@ -167,7 +176,7 @@ def mail_detail(msg_id):
     text, html = _bodies(msg)
     detail = _summary(msg_id, raw, msg, text)
     detail.update({
-        "headers": [[k, str(v)] for k, v in msg.raw_items()],
+        "headers": [[k, _undecodable_to_replacement(str(v))] for k, v in msg.raw_items()],
         "text": text,
         "html": html,
         "attachments": _attachments(msg),

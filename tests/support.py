@@ -22,12 +22,6 @@ from mailserver_mock.http_server import HTTP_HOST, HTTP_PORT  # noqa: E402
 from mailserver_mock.imap_server import IMAP_HOST, IMAP_PORT  # noqa: E402
 from mailserver_mock.smtp_server import SMTP_HOST, SMTP_PORT  # noqa: E402
 
-__all__ = [
-    "HTTP_HOST", "HTTP_PORT", "IMAP_HOST", "IMAP_PORT", "SMTP_HOST", "SMTP_PORT",
-    "ALTERNATIVE_MAIL", "MULTIPART_MAIL",
-    "dial", "http", "http_json", "imap_login", "imap_read_until", "imap_select", "read_line",
-    "reset_mails", "smtp_auth_login", "smtp_login", "smtp_send_mail", "start_servers", "write_line",
-]
 
 
 def start_servers():
