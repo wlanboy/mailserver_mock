@@ -7,7 +7,7 @@ import os
 MAX_LINE = 8192
 
 
-def env_timeout(name, default):
+def env_timeout(name: str, default: str) -> float | None:
     """Liest ein Socket-Timeout in Sekunden aus der Umgebung; ``0`` schaltet es ab."""
     value = float(os.environ.get(name, default))
     return value if value > 0 else None

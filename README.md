@@ -241,6 +241,28 @@ docker tag mailserver registry.gmk.lan/mailserver:latest
 docker push registry.gmk.lan/mailserver:latest
 ```
 
+### Container lokal starten
+
+Das Image deklariert `/app/data` als Volume. Darin liegen zwei Unterordner:
+
+| Pfad | Variable | Inhalt |
+|------|----------|--------|
+| `/app/data/mails` | `MAIL_DIR` | abgelegte Mails (`.eml`, `.flags`, Zähler) |
+| `/app/data/config/users.json` | `USERS_FILE` | Test-User und Fehlerszenarien |
+
+```bash
+docker run -d --name mailserver-mock \
+  -p 1025:1025 -p 1143:1143 -p 8025:8025 \
+  -v mailserver-mock-data:/app/data \
+  mailserver
+```
+
+Ist das Named Volume beim ersten Start leer, kopiert Docker beide Unterordner samt der mitgelieferten
+`users.json` hinein. Danach lässt sich `users.json` im Volume bearbeiten. Der Server liest die Datei bei
+jedem Login neu. Bei einem Bind-Mount (`-v ./data:/app/data`) kopiert Docker nichts. Dann muss
+`config/users.json` selbst angelegt werden. Das Host-Verzeichnis muss für UID 1000 beschreibbar sein, `mails/` legt der Server dann selbst an. Fehlt
+`users.json`, gibt es nur den einen User aus `MAIL_USER`/`MAIL_PASS`.
+
 ### Chart installieren
 
 ```bash
