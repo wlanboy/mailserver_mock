@@ -17,6 +17,8 @@ spec:
       labels:
         app: {{ .Values.deploymentName }}
         sidecar.istio.io/inject: "true"
+      annotations:
+        checksum/users: {{ include (print $.Template.BasePath "/configmap-users.yaml") . | sha256sum }}
     spec:
       # Die App spricht nicht mit der Kubernetes-API
       automountServiceAccountToken: false
