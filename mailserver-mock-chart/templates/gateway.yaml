@@ -9,17 +9,28 @@ spec:
   servers:
     - port:
         number: {{ .Values.istio.smtpPort }}
-        name: smtp
+        name: tcp-smtp
         protocol: TCP
       hosts:
         - "*"
     - port:
         number: {{ .Values.istio.imapPort }}
-        name: imap
+        name: tcp-imap
         protocol: TCP
       hosts:
         - "*"
     {{- if .Values.istio.http.enabled }}
+    {{- if .Values.istio.tls.enabled }}
+    - port:
+        number: {{ .Values.istio.tls.port }}
+        name: https
+        protocol: HTTPS
+      hosts:
+        {{- toYaml .Values.ingress.hosts | nindent 8 }}
+      tls:
+        mode: SIMPLE
+        credentialName: {{ .Values.istio.tls.secretName }}
+    {{- end }}
     - port:
         number: {{ .Values.istio.http.port }}
         name: http

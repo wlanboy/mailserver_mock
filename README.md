@@ -362,11 +362,13 @@ kubectl run mailtest --rm -it --restart=Never -n mailmock --image=debian:stable-
       --auth-user testuser --auth-password testpass --body 'This is the email body'"
 ```
 
-HTTP-API und Web-UI laufen über das Gateway auf Port 80 unter `mailmock.gmk.lan`:
+HTTP-API und Web-UI laufen über das Gateway unter `mailmock.gmk.lan`, per HTTP auf Port 80 und per HTTPS auf
+Port 443. Das Zertifikat stellt cert-manager über den `ClusterIssuer` `local-ca-issuer` aus, `curl` braucht
+dafür die lokale CA (`--cacert`) oder `-k`:
 
 ```bash
-curl -s http://mailmock.gmk.lan/health
-curl -s http://mailmock.gmk.lan/mails | jq '.mails[] | {id, subject}'
+curl -s https://mailmock.gmk.lan/health
+curl -s https://mailmock.gmk.lan/mails | jq '.mails[] | {id, subject}'
 ```
 
 Erwartetes Ergebnis in beiden Fällen: SMTP meldet `235` bei Login und `250` nach `DATA`, die IMAP-Session

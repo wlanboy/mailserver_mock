@@ -2,31 +2,35 @@
 
 Helm Chart für das Deployment des `mailserver-mock`-Services (SMTP/IMAP-Mock-Server für Tests) in Kubernetes.
 Externer Zugriff läuft über ein Istio Ingress-Gateway: SMTP und IMAP über reine **TCP-Routen**, die
-HTTP-API samt Web-UI über eine normale **HTTP-Route** auf Port 80 für `ingress.hosts`.
+HTTP-API samt Web-UI über eine **HTTP-Route** auf Port 80 und 443 (HTTPS, Zertifikat von cert-manager)
+für `ingress.hosts`.
 
 ## Überblick
 
 | Eigenschaft | Wert |
 |---|---|
 | Chart-Name | `mailserver-mock` |
-| Chart-Version | 0.3.0 |
+| Chart-Version | 0.4.0 |
 | App-Version | `latest` |
 | Typ | `application` |
 
 ## Komponenten
 
-- **Deployment** (`templates/deployment.yaml`) – genau 1 Replica des Containers `registry.gmk.lan/mailserver` mit Update-Strategie `Recreate` (RWO-PVC, ID-Vergabe nur prozessintern gesperrt), mit Startup-, Liveness- und Readiness-Probes per `httpGet` auf `/health`. Der Endpoint liefert nur `200`, wenn SMTP- und IMAP-Listener laufen und das Mail-Verzeichnis beschreibbar ist, und ist damit aussagekräftiger als ein reiner TCP-Check. Läuft als UID/GID 1000 mit read-only Root-Filesystem, ohne Capabilities und mit `resources`-Requests/-Limits; `/tmp` ist ein kleines `emptyDir`.
+- **Deployment** (`templates/deployment.yaml`) – genau 1 Replica des Containers `registry.gmk.lan/mailserver` mit Update-Strategie `Recreate` (RWO-PVC, ID-Vergabe nur prozessintern gesperrt), ohne Service-Account-Token (`automountServiceAccountToken: false`), mit Startup-, Liveness- und Readiness-Probes per `httpGet` auf `/health`. Der Endpoint liefert nur `200`, wenn SMTP- und IMAP-Listener laufen und das Mail-Verzeichnis beschreibbar ist, und ist damit aussagekräftiger als ein reiner TCP-Check. Läuft als UID/GID 1000 mit read-only Root-Filesystem, ohne Capabilities und mit `resources`-Requests/-Limits; `/tmp` ist ein kleines `emptyDir`.
 - **ConfigMap** (`templates/configmap-users.yaml`, nur bei `users.configMap.enabled: true`) – enthält die `users.json` mit Test-Usern und Fehlerszenarien, gemountet unter `/app/data/config/users.json`.
 - **PersistentVolumeClaim** (`templates/pvc.yaml`, nur bei `pvc.enabled: true`) – wird als `/app/data/mails`-Volume gemountet, persistiert die als `.eml` abgelegten Test-Mails über Pod-Neustarts hinweg.
-- **Service** (`templates/service.yaml`) – ClusterIP-Service mit den Ports `smtp` (1025), `imap` (1143) und `http` (8025).
+- **Service** (`templates/service.yaml`) – ClusterIP-Service mit den Ports `tcp-smtp` (1025), `tcp-imap` (1143) und `http` (8025). Die Präfixe `tcp-` und `http` sind die Istio-Namenskonvention für die Protokollerkennung (sonst Warnung IST0118).
 - **Gateway** (`templates/gateway.yaml`) – Istio `Gateway` mit zwei `protocol: TCP`-Server-Blöcken (SMTP/IMAP-Port), `hosts: ["*"]`, da bei reinem TCP (ohne TLS-Passthrough) keine SNI-basierte Host-Unterscheidung möglich ist.
   Bei `istio.http.enabled: true` kommt ein dritter Server-Block `protocol: HTTP` auf `istio.http.port` (80) mit `hosts: ingress.hosts` hinzu.
+  Ist zusätzlich `istio.tls.enabled: true`, folgt ein Server-Block `protocol: HTTPS` auf `istio.tls.port` (443) mit
+  `tls.mode: SIMPLE` und `credentialName: istio.tls.secretName`.
 - **VirtualService** (`templates/virtualservice.yaml`) – Istio `VirtualService` mit `tcp`-Routen (statt `http`), die anhand des Zielports zwischen SMTP und IMAP unterscheiden und beide an den Service weiterleiten.
-- **VirtualService HTTP** (`templates/virtualservice-http.yaml`, nur bei `istio.http.enabled: true`) – leitet HTTP-Requests für `ingress.hosts` an den `http`-Port des Service (API + Web-UI).
+- **VirtualService HTTP** (`templates/virtualservice-http.yaml`, nur bei `istio.http.enabled: true`) – leitet HTTP-Requests für `ingress.hosts` an den `http`-Port des Service (API + Web-UI). Die Route gilt für HTTP und HTTPS, weil TLS schon am Gateway endet.
+- **Certificate** (`templates/certificate.yaml`, nur bei `istio.http.enabled`, `istio.tls.enabled` und `certManager.enabled`) – cert-manager-`Certificate` für `ingress.hosts`. Es liegt im Namespace `istio.gatewayNamespace`, weil das Ingress-Gateway das Secret nur dort findet.
 
-Beide Istio-Templates prüfen zusätzlich über `.Capabilities.APIVersions.Has`, ob die Istio-CRDs im
-Zielcluster vorhanden sind – ein `helm install`/`helm template` schlägt also nicht fehl, falls Istio
-(noch) nicht installiert ist.
+Die Istio-Templates und das Certificate prüfen zusätzlich über `.Capabilities.APIVersions.Has`, ob die
+CRDs von Istio bzw. cert-manager im Zielcluster vorhanden sind. Ein `helm install`/`helm template` schlägt
+also nicht fehl, falls eins davon (noch) nicht installiert ist.
 
 ## Konfiguration (`values.yaml`)
 
@@ -55,6 +59,10 @@ Zielcluster vorhanden sind – ein `helm install`/`helm template` schlägt also 
 | `istio.gatewayName` | Name des Istio-Gateway-Objekts | `mailserver-mock-gw` |
 | `istio.smtpPort` / `istio.imapPort` | Ports, die das Istio-Gateway extern für SMTP/IMAP öffnet | `1025`, `1143` |
 | `istio.http.enabled` / `istio.http.port` | HTTP-Route für Web-UI/API über das Gateway | `true`, `80` |
+| `istio.gatewayNamespace` | Namespace des Istio-Ingress-Gateways, Ziel-Namespace des Certificate | `istio-ingress` |
+| `istio.tls.enabled` / `istio.tls.port` / `istio.tls.secretName` | HTTPS-Server im Gateway und Name des TLS-Secrets | `true`, `443`, `mailserver-mock-tls` |
+| `certManager.enabled` | Certificate für `ingress.hosts` anlegen. Bei `false` muss das Secret anders bereitgestellt werden | `true` |
+| `certManager.issuerRef.kind` / `certManager.issuerRef.name` | Issuer für das Certificate | `ClusterIssuer`, `local-ca-issuer` |
 
 `runAsNonRoot` steht auf Container-Ebene statt im Pod-`securityContext`: Ohne Istio-CNI läuft der
 injizierte `istio-init`-Container als root, ein Pod-weites `runAsNonRoot` würde ihn blockieren.
@@ -110,11 +118,11 @@ helm uninstall mailserver-mock -n mailmock
 
 ## Hinweise
 
-- **Kein TLS**: SMTP und IMAP sind reine TCP-Protokolle. Das Gateway terminiert kein TLS und
-  routet sie ausschließlich nach Zielport, nicht nach Hostname/SNI. `ingress.hosts`
-  (`mailmock.gmk.lan`) wirkt nur auf die HTTP-Route für Web-UI und API.
+- **TLS nur für Web-UI und API**: SMTP und IMAP sind reine TCP-Protokolle. Das Gateway terminiert dafür kein
+  TLS und routet sie ausschließlich nach Zielport, nicht nach Hostname/SNI. `ingress.hosts`
+  (`mailmock.gmk.lan`) wirkt nur auf die HTTP- und HTTPS-Route für Web-UI und API.
 - **Web-UI ohne Authentifizierung**: Wie bei MailHog/Mailpit kann jeder, der `http://mailmock.gmk.lan/`
-  erreicht, alle Test-Mails lesen und löschen. Bei Bedarf `istio.http.enabled: false` setzen und per
+  bzw. `https://mailmock.gmk.lan/` erreicht, alle Test-Mails lesen und löschen. Bei Bedarf `istio.http.enabled: false` setzen und per
   `kubectl port-forward svc/mailserver-mock-svc 8025 -n mailmock` zugreifen.
 - **Istio Ingress-Gateway-Service**: Damit SMTP/IMAP von außerhalb des Clusters erreichbar sind, muss
   der `Service` des `istio-ingressgateway` (üblicherweise `LoadBalancer`) zusätzlich die Ports 1025 und
@@ -128,6 +136,7 @@ helm uninstall mailserver-mock -n mailmock
 
 ```bash
 helm template mailserver-mock ./mailserver-mock-chart --api-versions networking.istio.io/v1beta1 \
+  --api-versions cert-manager.io/v1 --show-only templates/gateway.yaml --show-only templates/certificate.yaml \
   --show-only templates/virtualservice.yaml --show-only templates/virtualservice-http.yaml
 helm lint ./mailserver-mock-chart
 ```

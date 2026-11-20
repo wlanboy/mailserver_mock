@@ -18,6 +18,8 @@ spec:
         app: {{ .Values.deploymentName }}
         sidecar.istio.io/inject: "true"
     spec:
+      # Die App spricht nicht mit der Kubernetes-API
+      automountServiceAccountToken: false
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -56,9 +58,9 @@ spec:
               value: {{ .Values.env.usersFile | quote }}
               {{- end }}
           ports:
-            - name: smtp
+            - name: tcp-smtp
               containerPort: {{ .Values.service.smtp.targetPort }}
-            - name: imap
+            - name: tcp-imap
               containerPort: {{ .Values.service.imap.targetPort }}
             - name: http
               containerPort: {{ .Values.service.http.targetPort }}

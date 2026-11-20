@@ -117,7 +117,23 @@ istio:
   gatewayName: mailserver-mock-gw
   smtpPort: 1025
   imapPort: 1143
+  # Namespace des Istio-Ingress-Gateways, dort legt cert-manager das TLS-Secret an
+  gatewayNamespace: istio-ingress
   # Web-UI + HTTP-API über das Ingress-Gateway (HTTP, Host-basiert auf ingress.hosts)
   http:
     enabled: true
     port: 80
+  # HTTPS-Server für ingress.hosts, nur zusammen mit http.enabled.
+  # TLS endet am Gateway, SMTP/IMAP bleiben unverschlüsseltes TCP.
+  tls:
+    enabled: true
+    port: 443
+    secretName: mailserver-mock-tls
+
+# Certificate für ingress.hosts. Mit enabled: false muss das Secret istio.tls.secretName
+# im istio.gatewayNamespace anderweitig bereitgestellt werden.
+certManager:
+  enabled: true
+  issuerRef:
+    kind: ClusterIssuer
+    name: local-ca-issuer

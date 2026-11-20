@@ -1,0 +1,18 @@
+{{- if and .Values.istio.http.enabled .Values.istio.tls.enabled .Values.certManager.enabled (.Capabilities.APIVersions.Has "cert-manager.io/v1") }}
+# Das Secret muss im Namespace des Istio-Ingress-Gateways liegen, sonst findet das Gateway
+# die credentialName nicht.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.istio.tls.secretName }}
+  namespace: {{ .Values.istio.gatewayNamespace }}
+spec:
+  secretName: {{ .Values.istio.tls.secretName }}
+  issuerRef:
+    name: {{ .Values.certManager.issuerRef.name }}
+    kind: {{ .Values.certManager.issuerRef.kind }}
+  dnsNames:
+    {{- toYaml .Values.ingress.hosts | nindent 4 }}
+  privateKey:
+    rotationPolicy: Always
+{{- end }}
