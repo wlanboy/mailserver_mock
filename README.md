@@ -287,6 +287,26 @@ lassen sich so ohne Rebuild ändern: `helm upgrade ... --set-file users.json=use
 helm upgrade mailserver-mock ./mailserver-mock-chart -n mailmock
 ```
 
+Ein Deployment, das noch mit der Strategie `RollingUpdate` angelegt wurde, lässt sich nicht direkt auf
+`Recreate` umstellen. Das Upgrade bricht dann so ab:
+
+```
+spec.strategy.rollingUpdate: Forbidden: may not be specified when strategy `type` is 'Recreate'
+```
+
+Der API-Server hat damals `rollingUpdate` als Default gesetzt, und beim Server-Side Apply entfernt Helm
+dieses Feld nicht. Der folgende Patch stellt die Strategie einmalig im Cluster um, danach läuft das
+Upgrade wieder durch:
+
+```bash
+kubectl -n mailmock patch deployment mailserver-mock --type=json -p '[
+  {"op":"remove","path":"/spec/strategy/rollingUpdate"},
+  {"op":"replace","path":"/spec/strategy/type","value":"Recreate"}
+]'
+```
+
+Der Patch lässt das Pod-Template unverändert und löst deshalb keinen Rollout aus.
+
 ### Deployment neu ausrollen
 
 ```bash
